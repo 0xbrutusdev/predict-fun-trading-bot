@@ -1,1 +1,36 @@
-{"name":"predict-fun-trading-bot","version":"0.1.0","private":true,"type":"module","engines":{"node":">=22.13"},"scripts":{"dev":"tsx src/server.ts","build":"tsc","start":"node dist/server.js","test":"tsx --test tests/*.test.ts","check":"tsc --noEmit"},"dependencies":{"@fastify/cors":"^10.0.0","@fastify/rate-limit":"^10.0.0","@predictdotfun/sdk":"1.3.8","ethers":"^6.13.0","fastify":"^5.0.0","ws":"^8.18.0","zod":"4.6.7"},"devDependencies":{"@types/node":"^22.0.0","@types/ws":"^8.5.0","tsx":"^4.19.0","typescript":"^5.7.0"}}
+{
+  "name": "predict-fun-trading-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "tsc --noEmit",
+    "replay": "tsx src/replay.ts",
+    "format": "prettier --write src tests package.json tsconfig.json",
+    "format:check": "prettier --check src tests package.json tsconfig.json",
+    "api:export": "tsx src/export-openapi.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "@predictdotfun/sdk": "1.3.8",
+    "ethers": "^6.13.0",
+    "fastify": "^5.0.0",
+    "ws": "^8.18.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "prettier": "3.9.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

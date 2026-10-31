@@ -5,3 +5,5 @@ data/
 *.db*
 coverage/
 *.log
+
+__pycache__/
