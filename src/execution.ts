@@ -83,6 +83,13 @@ export function paperFill(
   now: number,
 ) {
   return store.transaction(() => {
+    if (
+      ![target, limit, now, b.receivedAt, b.updatedAt].every(Number.isFinite) ||
+      target <= 0 ||
+      limit <= 0 ||
+      limit >= 1
+    )
+      throw Error("invalid_order_input");
     if (store.get("execution", key))
       return { status: "duplicate", quantity: 0 };
     const a = store.get<Account>("account", accountId);
@@ -93,6 +100,7 @@ export function paperFill(
       now >= m.end ||
       now < m.start ||
       b.receivedAt > now ||
+      b.updatedAt > now ||
       now - b.receivedAt > 1000 ||
       now - b.updatedAt > 1000
     )
@@ -111,15 +119,16 @@ export function paperFill(
       (
         store.db
           .prepare(
-            "SELECT COALESCE(SUM(pnl),0) pnl FROM fills WHERE account=? AND payout IS NOT NULL AND settled_at>=?",
+            "SELECT COALESCE(SUM(pnl),0) pnl FROM fills WHERE account=? AND payout IS NOT NULL AND settled_at>=? AND settled_at<=?",
           )
-          .get(a.id, day) as any
+          .get(a.id, day, now) as any
       ).pnl,
     );
     if (pnl <= -units(a.initialEquity * a.dailyLossLimit))
       throw Error("daily_loss_limit");
     const budget = Math.min(
       units(a.cash),
+      units(a.initialEquity * a.dailyLossLimit) + pnl - total,
       units(a.initialEquity * a.maxTotalRisk) - total,
       units(a.initialEquity * a.maxMarketRisk) - marketRisk,
     );
@@ -186,11 +195,28 @@ export function settle(store: Store, m: Market, now = Date.now()) {
     !m.payout ||
     m.status !== "RESOLVED" ||
     now < m.end ||
-    m.payout.some((x) => x < 0 || x > 1) ||
+    m.payout.length !== 2 ||
+    !Number.isSafeInteger(now) ||
+    !Number.isSafeInteger(m.end) ||
+    m.payout.some((x) => !Number.isFinite(x) || x < 0 || x > 1) ||
     Math.abs(m.payout[0] + m.payout[1] - 1) > 1e-9
   )
     throw Error("invalid_resolution");
   store.transaction(() => {
+    const previous = store.get<Market>("market", m.id);
+    if (
+      previous &&
+      (previous.start !== m.start ||
+        previous.end !== m.end ||
+        previous.upToken !== m.upToken ||
+        previous.downToken !== m.downToken)
+    )
+      throw Error("resolution_market_mismatch");
+    if (
+      previous?.payout &&
+      JSON.stringify(previous.payout) !== JSON.stringify(m.payout)
+    )
+      throw Error("resolution_conflict");
     const rows = store.db
       .prepare("SELECT * FROM fills WHERE market=? AND payout IS NULL")
       .all(m.id) as any[];

@@ -3,6 +3,8 @@ import { Store } from "./store.js";
 import type { Book, Candle, Market } from "./domain.js";
 export class Collector {
   private ws?: WebSocket;
+  private abort = new AbortController();
+  private tasks = new Set<Promise<void>>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private lastMessage = Date.now();
   private schedule(fn: () => void, ms: number) {
@@ -27,14 +29,17 @@ export class Collector {
     if (wait) await new Promise((r) => setTimeout(r, wait));
     const r = await fetch(`https://api.predict.fun/v1${path}`, {
       headers: { "x-api-key": this.key },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.any([AbortSignal.timeout(10000), this.abort.signal]),
     });
     if (!r.ok) throw Error(`predict_http_${r.status}`);
     return r.json() as Promise<any>;
   }
   recordBook(b: Book) {
     if (
-      !Number.isFinite(b.updatedAt) ||
+      !Number.isSafeInteger(b.receivedAt) ||
+      !Number.isSafeInteger(b.updatedAt) ||
+      !Array.isArray(b.asks) ||
+      !Array.isArray(b.bids) ||
       b.updatedAt > b.receivedAt + 250 ||
       [...b.asks, ...b.bids].some(
         (x) =>
@@ -48,7 +53,12 @@ export class Collector {
     )
       throw Error("invalid_book");
     const history = this.store.get<Book[]>("books", b.marketId) || [];
-    if (history.length && b.updatedAt < history.at(-1)!.updatedAt) return;
+    if (
+      history.length &&
+      (b.updatedAt < history.at(-1)!.updatedAt ||
+        b.receivedAt < history.at(-1)!.receivedAt)
+    )
+      return;
     this.store.put("books", b.marketId, [...history, b].slice(-1000));
     this.store.event("book", b, b.receivedAt);
   }
@@ -67,11 +77,17 @@ export class Collector {
       try {
         await fn();
       } catch (e) {
-        this.store.event("collector.error", { reason: String(e) });
+        if (!this.stopped)
+          this.store.event("collector.error", { reason: String(e) });
       }
-      if (!this.stopped) this.schedule(tick, ms);
+      if (!this.stopped) this.schedule(launch, ms);
     };
-    void tick();
+    const launch = () => {
+      const task = tick();
+      this.tasks.add(task);
+      void task.finally(() => this.tasks.delete(task));
+    };
+    launch();
   }
   private connect() {
     if (this.stopped) return;
@@ -86,6 +102,7 @@ export class Collector {
       this.subscribe();
     });
     this.ws.on("message", (raw) => {
+      if (this.stopped) return;
       this.lastMessage = Date.now();
       try {
         const m = JSON.parse(raw.toString());
@@ -105,7 +122,11 @@ export class Collector {
         } else if (m.topic?.startsWith("predictTradingStatus/")) {
           const id = m.topic.split("/")[1],
             market = this.store.get<Market>("market", id);
-          if (market) {
+          if (
+            market &&
+            market.status !== "RESOLVED" &&
+            market.end > Date.now()
+          ) {
             market.status = m.data.tradingStatus === "OPEN" ? "OPEN" : "CLOSED";
             this.store.put("market", id, market);
           }
@@ -114,8 +135,11 @@ export class Collector {
         this.store.event("collector.error", { reason: String(e) });
       }
     });
-    this.ws.on("error", () =>
-      this.store.event("collector.error", { reason: "websocket_error" }),
+    this.ws.on(
+      "error",
+      () =>
+        !this.stopped &&
+        this.store.event("collector.error", { reason: "websocket_error" }),
     );
     this.ws.on("close", () => {
       if (!this.stopped) {
@@ -184,7 +208,12 @@ export class Collector {
         if (this.stopped) return;
         const r = await fetch(
           `https://www.okx.com/api/v5/market/candles?instId=${symbol}-USDT-SWAP&bar=${bar}&limit=300`,
-          { signal: AbortSignal.timeout(10000) },
+          {
+            signal: AbortSignal.any([
+              AbortSignal.timeout(10000),
+              this.abort.signal,
+            ]),
+          },
         );
         if (!r.ok) throw Error(`okx_http_${r.status}`);
         const body = (await r.json()) as any;
@@ -211,9 +240,12 @@ export class Collector {
         await new Promise((r) => setTimeout(r, 120));
       }
   }
-  stop() {
+  async stop() {
     this.stopped = true;
     this.timers.forEach(clearTimeout);
-    this.ws?.close();
+    this.timers.clear();
+    this.abort.abort();
+    this.ws?.terminate();
+    await Promise.allSettled([...this.tasks]);
   }
 }

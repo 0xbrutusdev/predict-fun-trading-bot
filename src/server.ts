@@ -24,7 +24,7 @@ const close = async () => {
   if (closing) return;
   closing = true;
   clearInterval(timer);
-  collector.stop();
+  await collector.stop();
   await app.close();
   store.close();
 };

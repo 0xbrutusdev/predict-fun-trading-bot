@@ -22,9 +22,13 @@ export async function replay(path: string, store: Store) {
     previous = e.time;
     switch (e.type) {
       case "setup.account":
+        if (store.get("account", e.data.id))
+          throw Error("duplicate_account_setup");
         store.put("account", e.data.id, e.data);
         break;
       case "setup.market":
+        if (store.get("market", e.data.id))
+          throw Error("duplicate_market_setup");
         store.put("market", e.data.id, e.data);
         break;
       case "book":

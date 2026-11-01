@@ -2,6 +2,8 @@
 
 Base path `/v1`. All endpoints require `Authorization: Bearer <server-side token>` except `/health`. GETs accept either owner or read-only credentials; mutations require owner credentials. One token controls the entire installation, not just one account. Route through your BFF. API keys/private keys are provisioned on the server, never via browser forms.
 
+The optional read-only token must be at least 32 characters and must differ from the administrator token. New paper risk is capped by remaining daily loss budget after realized PnL and unresolved committed capital.
+
 Successful resources return `{data: ...}`; cursor collections also return `{meta:{nextCursor:number}}`. Errors return `{error:{code:string,details?:unknown}}`. Timestamps are UTC epoch milliseconds. Prices are probabilities in `[0,1]`; balances, costs, fees and PnL are USDT. Slot confidence is a strategy score, not calibrated probability. Market IDs/token IDs are strings. All financial values refer to paper simulation in this version.
 
 ## Account and strategy screens

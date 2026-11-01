@@ -61,6 +61,8 @@ export async function createApp(
   origin = "http://localhost:5173",
   readToken?: string,
 ) {
+  if (readToken && (readToken.length < 32 || readToken === token))
+    throw Error("API_READ_TOKEN must be distinct and at least 32 characters");
   if (token.length < 32)
     throw Error("API_TOKEN must contain at least 32 characters");
   const app = Fastify({
