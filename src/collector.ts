@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { archiveCandles, parseCandles } from "./history.js";
 import { Store } from "./store.js";
 import type { Book, Candle, Market } from "./domain.js";
 export class Collector {
@@ -218,16 +219,11 @@ export class Collector {
         if (!r.ok) throw Error(`okx_http_${r.status}`);
         const body = (await r.json()) as any;
         if (body.code !== "0") throw Error("okx_error");
-        const rows: Candle[] = body.data
-          .filter((x: string[]) => x[8] === "1")
-          .map((x: string[]) => ({
-            time: Number(x[0]),
-            open: Number(x[1]),
-            high: Number(x[2]),
-            low: Number(x[3]),
-            close: Number(x[4]),
-            volume: Number(x[5]),
-          }));
+        const observedAt = Date.now();
+        const rows = parseCandles(body.data, duration, observedAt);
+        this.store.transaction(() =>
+          archiveCandles(this.store, symbol, duration, rows, observedAt),
+        );
         const prior =
           this.store.get<Candle[]>("candles", `${symbol}:${duration}`) || [];
         const combined = [
@@ -236,7 +232,7 @@ export class Collector {
           .sort((a, b) => a.time - b.time)
           .slice(-86400);
         this.store.put("candles", `${symbol}:${duration}`, combined);
-        this.store.event("candles", { symbol, duration, rows });
+        this.store.event("candles", { symbol, duration, rows }, observedAt);
         await new Promise((r) => setTimeout(r, 120));
       }
   }

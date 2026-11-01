@@ -15,7 +15,8 @@
     "replay": "tsx src/replay.ts",
     "format": "prettier --write src tests package.json tsconfig.json",
     "format:check": "prettier --check src tests package.json tsconfig.json",
-    "api:export": "tsx src/export-openapi.ts"
+    "api:export": "tsx src/export-openapi.ts",
+    "backfill": "tsx src/backfill.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
