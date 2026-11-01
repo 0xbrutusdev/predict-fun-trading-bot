@@ -7,3 +7,5 @@ coverage/
 *.log
 
 __pycache__/
+/PREDICT_FUN_IMPLEMENTATION_PLAN.md
+/docs/

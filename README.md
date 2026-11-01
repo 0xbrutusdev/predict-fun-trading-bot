@@ -2,7 +2,7 @@
 
 基于 TypeScript 的预测市场研究与模拟交易系统，包含闭合 K 线指标、策略注册表、Predict WebSocket/REST 行情采集、OKX K 线采集、CT4 检查点执行、持久化账本、历史回放及前端 API。
 
-**当前版本为研究和模拟交易版本，不支持实盘下单。** 模拟余额与 PnL 不代表链上钱包资产；代码通过测试也不代表策略具有盈利能力。原始 `b.md` 已从当前分支删除，实施方案保留在 [实施计划](PREDICT_FUN_IMPLEMENTATION_PLAN.md)。
+**当前版本为研究和模拟交易版本，不支持实盘下单。** 模拟余额与 PnL 不代表链上钱包资产；代码通过测试也不代表策略具有盈利能力。原始规格、实施计划和本地文档不随当前分支发布。
 
 ## 环境与启动
 
@@ -41,8 +41,7 @@ node --env-file=.env dist/server.js
 
 ## 前端集成
 
-- [API 使用说明](docs/API.md)
-- [OpenAPI 3.1 规范](docs/openapi.json)
+- 使用 `npm run api:export` 生成本地 OpenAPI 3.1 规范（`docs/openapi.json`，不提交到 Git）。
 - [服务端/BFF TypeScript 客户端](src/client.ts)
 - 在线规范：`GET /v1/openapi.json`
 
