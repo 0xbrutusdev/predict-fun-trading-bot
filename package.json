@@ -12,6 +12,9 @@
     "start": "node dist/server.js",
     "test": "tsx --test tests/*.test.ts",
     "check": "tsc --noEmit",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "test:e2e": "playwright test",
     "replay": "tsx src/replay.ts",
     "format": "prettier --write src tests package.json tsconfig.json",
     "format:check": "prettier --check src tests package.json tsconfig.json",
@@ -28,6 +31,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "prettier": "3.9.10",

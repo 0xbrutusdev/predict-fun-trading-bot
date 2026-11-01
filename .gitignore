@@ -9,3 +9,12 @@ coverage/
 __pycache__/
 /PREDICT_FUN_IMPLEMENTATION_PLAN.md
 /docs/
+web/.next/
+web/.env*
+!web/.env.example
+web/*.tsbuildinfo
+.vercel/
+test-results/
+playwright-report/
+.vercel
+.env*

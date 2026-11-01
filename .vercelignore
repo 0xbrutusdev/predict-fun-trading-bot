@@ -1,0 +1,12 @@
+node_modules/
+web/node_modules/
+web/.next/
+web/.env*
+.env*
+data/
+docs/
+PREDICT_FUN_IMPLEMENTATION_PLAN.md
+dist/
+test-results/
+playwright-report/
+.git/

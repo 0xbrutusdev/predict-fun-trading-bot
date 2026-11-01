@@ -41,6 +41,39 @@ node --env-file=.env dist/server.js
 
 ## 前端集成
 
+项目现包含 `web/` 下的 Next.js 16 中文控制台和 Next.js API 网关：账户创建/启停、风险配置、策略槽位、市场盘口、持仓、成交、PnL、运行事件和数据时效监控。页面只展示连接的 Worker 数据；断线或超过 30 秒未同步时保留上次结果并禁用交易配置操作。
+
+### 本地运行控制台
+
+先按上文启动 Worker，再开一个终端：
+
+```powershell
+npm ci --prefix web
+Copy-Item web/.env.example web/.env.local
+# BOT_API_URL=http://127.0.0.1:3000
+# BOT_API_TOKEN 填入 Worker 的 API_TOKEN；只读控制台可使用 API_READ_TOKEN。
+# DASHBOARD_ACCESS_KEY 使用独立的至少 32 字符随机密钥，不能复用交易所密钥。
+npm run web:dev
+```
+
+访问 `http://localhost:3001`，使用控制台访问密钥登录。密钥不写入浏览器本地存储；会话为有效期 8 小时的 HttpOnly、SameSite=Strict Cookie，生产环境额外设置 Secure。修改请求校验同源 Origin。控制台是单所有者管理界面，不是多用户权限系统。轮换 `DASHBOARD_ACCESS_KEY` 会使现有会话失效。
+
+### Vercel 部署边界
+
+Vercel 项目的 Root Directory 设置为 `web`，Framework 选择 Next.js，Node 选择 22.x。生产环境设置服务端变量 `DASHBOARD_ACCESS_KEY`、`BOT_API_URL`（Worker 的 HTTPS 根地址）、`BOT_API_TOKEN`。这些变量都不能使用 `NEXT_PUBLIC_` 前缀。访问密钥未配置时登录关闭；Worker 未配置时显示明确错误，不使用演示收益替代。
+
+Next.js 在 Vercel 提供前端、登录和 `/api/bot/*` 后端网关。250ms 持续执行循环、行情连接及 SQLite 仍在独立持久化 Node Worker 运行；不能直接放入短时 Vercel 请求函数。Worker 每个数据库只运行一个实例，使用持久磁盘、进程守护及 HTTPS 反向代理。尚未配置 Worker 主机时，部署成功仅代表控制台在线，不代表机器人在生产执行。当前未开通任何付费主机或数据库。
+
+GitHub 自动部署还需要 Vercel GitHub App 有权访问本仓库。在 Vercel 项目 Settings → Git 连接 `0xbrutusdev/predict-fun-trading-bot`，生产分支选择 `main`。回滚控制台可在 Vercel 提升上一成功部署；Worker 更新前备份 SQLite，回滚时暂停进程并恢复匹配版本，避免多个写入进程。
+
+### 可观测性与验证
+
+- `GET /api/health`：仅检查 Next.js 服务存活，不代表 Worker 就绪。
+- `GET /v1/observability`（Worker）或 `/api/bot/observability`（登录后）：引擎心跳、单轮耗时、异常计数、行情开关、活跃市场、过期盘口、缺失 K 线源及最近 50 条操作事件。不包含高流量的原始盘口/K 线事件。
+- 网关日志包含请求 ID、方法、路径、上游状态、耗时；该 ID 传递到 Worker 日志。日志不包含访问密钥、Token 或请求体。
+- `npm test` 覆盖账本/执行/采集和网关到真实 Worker HTTP 集成；`npm run web:build` 后运行 `npm run test:e2e`，使用 Chromium 和独立内存数据库验证登录、配置、暂停、移动端布局和退出。测试不会打开运营数据库。
+- 就绪表示已覆盖的运行条件满足，不代表策略获利、全部特征连续性已通过或已允许实盘。市场审核与最终派彩仍需通过 Worker API 提交核实结果。
+
 - 使用 `npm run api:export` 生成本地 OpenAPI 3.1 规范（`docs/openapi.json`，不提交到 Git）。
 - [服务端/BFF TypeScript 客户端](src/client.ts)
 - 在线规范：`GET /v1/openapi.json`
