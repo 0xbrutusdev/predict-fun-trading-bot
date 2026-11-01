@@ -7,6 +7,7 @@ import { Store } from "./store.js";
 import { slots, blocked } from "./strategies.js";
 import { settle, type Account } from "./execution.js";
 import { money, type Market } from "./domain.js";
+import { observability, type RuntimeStatus } from "./observability.js";
 const id = z
   .string()
   .min(1)
@@ -60,12 +61,19 @@ export async function createApp(
   token: string,
   origin = "http://localhost:5173",
   readToken?: string,
+  runtime?: RuntimeStatus,
 ) {
   if (readToken && (readToken.length < 32 || readToken === token))
     throw Error("API_READ_TOKEN must be distinct and at least 32 characters");
   if (token.length < 32)
     throw Error("API_TOKEN must contain at least 32 characters");
   const app = Fastify({
+    genReqId: (req) => {
+      const value = req.headers["x-request-id"];
+      return typeof value === "string" && /^[a-f0-9-]{36}$/.test(value)
+        ? value
+        : randomUUID();
+    },
     bodyLimit: 262144,
     logger: { redact: ["req.headers.authorization"] },
   });
@@ -189,6 +197,12 @@ export async function createApp(
     });
   };
   app.get("/health", () => ({ status: "ok" }));
+  route(
+    "GET",
+    "/v1/observability",
+    "Worker readiness, freshness and recent operational events",
+    () => ({ data: observability(store, runtime) }),
+  );
   route("GET", "/v1/openapi.json", "OpenAPI contract", () => spec);
   route("GET", "/v1/status", "Bot capabilities and release gates", () => ({
     data: {
