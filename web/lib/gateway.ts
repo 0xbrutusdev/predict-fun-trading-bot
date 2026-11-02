@@ -53,10 +53,23 @@ export function json(
 const error = (code: string, status: number, requestId?: string) =>
   json({ error: { code, requestId } }, status);
 export function sameOrigin(req: Request) {
-  return (
-    req.headers.get("origin") === new URL(req.url).origin &&
-    req.headers.get("sec-fetch-site") !== "cross-site"
-  );
+  const origin = req.headers.get("origin");
+  if (!origin || req.headers.get("sec-fetch-site") === "cross-site")
+    return false;
+  const requestUrl = new URL(req.url);
+  if (origin === requestUrl.origin) return true;
+  const rawHost =
+    req.headers.get("x-forwarded-host")?.split(",", 1)[0]?.trim() ||
+    req.headers.get("host");
+  const rawProtocol =
+    req.headers.get("x-forwarded-proto")?.split(",", 1)[0]?.trim() ||
+    requestUrl.protocol.slice(0, -1);
+  if (!rawHost || !["http", "https"].includes(rawProtocol)) return false;
+  try {
+    return origin === new URL(`${rawProtocol}://${rawHost}`).origin;
+  } catch {
+    return false;
+  }
 }
 async function limitedBody(req: Request) {
   if (!req.headers.get("content-type")?.startsWith("application/json"))

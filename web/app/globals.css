@@ -199,6 +199,25 @@ header {
   align-items: center;
   gap: 16px;
 }
+.locale-switch {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #11171c;
+}
+.locale-switch button {
+  min-width: 40px;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.locale-switch button.active {
+  background: #2a343c;
+  color: var(--mint);
+}
 .avatar {
   border-radius: 50%;
   width: 30px;
@@ -617,7 +636,17 @@ footer {
   }
   header {
     height: 55px;
-    padding: 0 20px;
+    padding: 0 12px;
+  }
+  .header-actions {
+    gap: 8px;
+  }
+  .header-actions > .badge,
+  .header-actions > .avatar {
+    display: none;
+  }
+  .locale-switch button {
+    min-width: 36px;
   }
   .content {
     padding: 24px 16px;

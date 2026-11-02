@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
 export const metadata: Metadata = {
-  title: "Predict.fun · 量化控制台",
+  title: "Predict.fun · Control Room / 量化控制台",
   description:
-    "Predict.fun 预测市场量化交易控制台：策略、账户、风险与运行监控。",
+    "Predict.fun prediction-market control room for strategies, accounts, risk, and operations. Predict.fun 预测市场量化交易控制台。",
   robots: { index: false, follow: false },
 };
 export default function Layout({ children }: { children: React.ReactNode }) {

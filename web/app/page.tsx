@@ -63,13 +63,16 @@ type Snapshot = {
   features: unknown[];
   selected: string[];
 };
-const money = (v: number) =>
-  new Intl.NumberFormat("en-US", {
+type Locale = "en" | "zh";
+const money = (v: number, locale: Locale) =>
+  new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(v);
-const time = (v: number) =>
-  new Date(v).toLocaleString("zh-CN", { hour12: false });
+const time = (v: number, locale: Locale) =>
+  new Date(v).toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    hour12: false,
+  });
 async function api<T>(
   path: string,
   method = "GET",
@@ -87,22 +90,56 @@ async function api<T>(
   if (!r.ok) throw new Error(data.error?.code ?? `http_${r.status}`);
   return data.data as T;
 }
-const tabs = ["总览", "策略配置", "市场行情", "成交与持仓", "运行监控"];
-const labels: Record<string, string> = {
-  worker_not_configured:
-    "尚未配置生产 Worker。请设置服务端 BOT_API_URL 与 BOT_API_TOKEN。",
-  worker_unreachable: "无法连接 Worker，请检查服务状态与网络。",
-  unauthorized: "登录已过期，请重新登录。",
-  engine_heartbeat_missing: "引擎心跳缺失",
-  recent_engine_error: "近期引擎错误",
-  collector_disabled: "行情采集未开启",
-  no_active_registered_markets: "没有已审核的活跃市场",
-  stale_order_books: "订单簿已过期",
-  recent_collector_error: "近期行情采集错误",
-  insufficient_or_stale_candles: "K 线历史不足或已过期",
+const tabLabels = {
+  en: ["Overview", "Strategies", "Markets", "Fills & positions", "Operations"],
+  zh: ["总览", "策略配置", "市场行情", "成交与持仓", "运行监控"],
+} satisfies Record<Locale, string[]>;
+const labels: Record<string, Record<Locale, string>> = {
+  worker_not_configured: {
+    en: "The production Worker is not configured. Set BOT_API_URL and BOT_API_TOKEN on the server.",
+    zh: "尚未配置生产 Worker。请设置服务端 BOT_API_URL 与 BOT_API_TOKEN。",
+  },
+  worker_unreachable: {
+    en: "The Worker is unreachable. Check its status and network connection.",
+    zh: "无法连接 Worker，请检查服务状态与网络。",
+  },
+  unauthorized: {
+    en: "Your session has expired. Sign in again.",
+    zh: "登录已过期，请重新登录。",
+  },
+  dashboard_unreachable: {
+    en: "The control-room service is unreachable.",
+    zh: "无法连接控制台服务",
+  },
+  invalid_access_key: {
+    en: "Invalid dashboard access key.",
+    zh: "控制台访问密钥无效。",
+  },
+  origin_rejected: {
+    en: "The request origin was rejected. Reload this page and try again.",
+    zh: "请求来源被拒绝。请刷新此页面后重试。",
+  },
+  dashboard_not_configured: {
+    en: "Dashboard login is not configured.",
+    zh: "控制台登录尚未配置。",
+  },
+  engine_heartbeat_missing: { en: "Engine heartbeat missing", zh: "引擎心跳缺失" },
+  recent_engine_error: { en: "Recent engine error", zh: "近期引擎错误" },
+  collector_disabled: { en: "Market collector disabled", zh: "行情采集未开启" },
+  no_active_registered_markets: {
+    en: "No active approved markets",
+    zh: "没有已审核的活跃市场",
+  },
+  stale_order_books: { en: "Order books are stale", zh: "订单簿已过期" },
+  recent_collector_error: { en: "Recent collector error", zh: "近期行情采集错误" },
+  insufficient_or_stale_candles: {
+    en: "Candle history is insufficient or stale",
+    zh: "K 线历史不足或已过期",
+  },
 };
 
 export default function Dashboard() {
+  const [locale, setLocale] = useState<Locale>("zh");
   const [auth, setAuth] = useState<boolean | null>(null),
     [configured, setConfigured] = useState(true),
     [key, setKey] = useState("");
@@ -120,6 +157,26 @@ export default function Dashboard() {
     request = useRef(0),
     activeId = useRef(accountId);
   const [book, setBook] = useState<{ id: string; data: unknown } | null>(null);
+  const tabs = tabLabels[locale];
+  const tx = useCallback(
+    (zh: string, en: string) => (locale === "zh" ? zh : en),
+    [locale],
+  );
+  const label = useCallback(
+    (code: string) => labels[code]?.[locale] ?? code,
+    [locale],
+  );
+  useEffect(() => {
+    const saved = window.localStorage.getItem("predict_locale");
+    const next = saved === "en" || saved === "zh" ? saved : "zh";
+    setLocale(next);
+    document.documentElement.lang = next === "zh" ? "zh-CN" : "en";
+  }, []);
+  const changeLocale = (next: Locale) => {
+    setLocale(next);
+    window.localStorage.setItem("predict_locale", next);
+    document.documentElement.lang = next === "zh" ? "zh-CN" : "en";
+  };
   useEffect(() => {
     fetch("/api/session")
       .then((r) => r.json())
@@ -129,7 +186,7 @@ export default function Dashboard() {
       })
       .catch(() => {
         setAuth(false);
-        setError("无法连接控制台服务");
+        setError("dashboard_unreachable");
       });
   }, []);
   const refresh = useCallback(async () => {
@@ -170,7 +227,7 @@ export default function Dashboard() {
     } catch (e) {
       if (seq === request.current) {
         const message = (e as Error).message;
-        setError(labels[message] ?? message);
+        setError(message);
         if (message === "unauthorized") setAuth(false);
       }
     }
@@ -195,10 +252,10 @@ export default function Dashboard() {
     setNotice("");
     try {
       await api(path, method, body);
-      setNotice("已保存，变更已提交到 Worker。");
+      setNotice("saved");
       await refresh();
     } catch (e) {
-      setError(labels[(e as Error).message] ?? (e as Error).message);
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -231,12 +288,18 @@ export default function Dashboard() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="/" aria-label="Predict 控制台">
+        <a
+          className="brand"
+          href="/"
+          aria-label={tx("Predict 控制台", "Predict control room")}
+        >
           <span className="brand-icon">↗</span>predict
           <span className="brand-dot">.</span>
           <small>CONTROL ROOM</small>
         </a>
-        <div className="workspace-label">量化交易工作台</div>
+        <div className="workspace-label">
+          {tx("量化交易工作台", "QUANT TRADING WORKSPACE")}
+        </div>
         <nav>
           {tabs.map((t, i) => (
             <button
@@ -258,17 +321,33 @@ export default function Dashboard() {
         </nav>
         <div className="side-bottom">
           <span className="badge">PAPER TRADING</span>
-          <p>模拟执行 · 实盘未开放</p>
+          <p>{tx("模拟执行 · 实盘未开放", "Simulation only · Live trading disabled")}</p>
           <small>Predict.fun / BNB Chain</small>
         </div>
       </aside>
       <main>
         <header>
           <div className="breadcrumb">
-            工作台 <span>/</span> {tabs[tab]}
+            {tx("工作台", "Workspace")} <span>/</span> {tabs[tab]}
           </div>
           <div className="header-actions">
             <span className="badge muted">USDT</span>
+            <div className="locale-switch" aria-label={tx("语言", "Language")}>
+              <button
+                className={locale === "en" ? "active" : ""}
+                aria-pressed={locale === "en"}
+                onClick={() => changeLocale("en")}
+              >
+                EN
+              </button>
+              <button
+                className={locale === "zh" ? "active" : ""}
+                aria-pressed={locale === "zh"}
+                onClick={() => changeLocale("zh")}
+              >
+                中文
+              </button>
+            </div>
             {auth && (
               <button
                 className="text-button"
@@ -282,7 +361,7 @@ export default function Dashboard() {
                   }
                 }}
               >
-                退出登录
+                {tx("退出登录", "Sign out")}
               </button>
             )}
             <span className="avatar">P</span>
@@ -293,47 +372,72 @@ export default function Dashboard() {
             <div>
               <div className="eyebrow">PREDICT.FUN / OPERATIONS</div>
               <h1>{tabs[tab]}</h1>
-              <p>从策略信号到成交结果，每一步都有据可查。</p>
+              <p>
+                {tx(
+                  "从策略信号到成交结果，每一步都有据可查。",
+                  "Trace every step from strategy signal to execution result.",
+                )}
+              </p>
             </div>
             {auth && (
               <div className="actions">
                 <button disabled={busy} onClick={() => void refresh()}>
-                  ↻ 刷新
+                  ↻ {tx("刷新", "Refresh")}
                 </button>
                 <button
                   className="danger"
                   disabled={disabled}
                   onClick={() => {
-                    if (confirm("暂停全部模拟账户？现有持仓将保留。"))
+                    if (
+                      confirm(
+                        tx(
+                          "暂停全部模拟账户？现有持仓将保留。",
+                          "Pause all paper accounts? Existing positions will remain open.",
+                        ),
+                      )
+                    )
                       void mutate("kill-switch", "POST", {});
                   }}
                 >
-                  暂停全部账户
+                  {tx("暂停全部账户", "Pause all accounts")}
                 </button>
               </div>
             )}
           </div>
           {error && (
             <div className="alert error" role="alert">
-              {error}
-              {updated > 0 && " · 当前显示上次成功同步的数据"}
+              {label(error)}
+              {updated > 0 &&
+                tx(
+                  " · 当前显示上次成功同步的数据",
+                  " · Showing data from the last successful sync",
+                )}
             </div>
           )}
           {notice && (
             <div className="alert" role="status">
-              {notice}
+              {notice === "saved"
+                ? tx("已保存，变更已提交到 Worker。", "Saved. Changes were submitted to the Worker.")
+                : notice === "strategy_saved"
+                  ? tx("策略已保存；仅影响新意图。", "Strategies saved; only new intents are affected.")
+                  : notice}
             </div>
           )}
           {auth === null ? (
-            <div className="empty">正在检查会话…</div>
+            <div className="empty">{tx("正在检查会话…", "Checking session…")}</div>
           ) : !auth ? (
             <section className="login panel">
               <div className="eyebrow">SECURE ACCESS</div>
-              <h2>连接你的交易工作台</h2>
-              <p>使用独立控制台访问密钥登录。交易所密钥仅保存在服务端。</p>
+              <h2>{tx("连接你的交易工作台", "Connect to your trading workspace")}</h2>
+              <p>
+                {tx(
+                  "使用独立控制台访问密钥登录。交易所密钥仅保存在服务端。",
+                  "Sign in with the dedicated dashboard access key. Exchange credentials remain server-side.",
+                )}
+              </p>
               <form onSubmit={signIn}>
                 <label>
-                  控制台访问密钥
+                  {tx("控制台访问密钥", "Dashboard access key")}
                   <input
                     type="password"
                     autoComplete="current-password"
@@ -344,19 +448,24 @@ export default function Dashboard() {
                   />
                 </label>
                 <button className="primary" disabled={busy || !configured}>
-                  进入控制台 →
+                  {tx("进入控制台 →", "Enter control room →")}
                 </button>
               </form>
               {!configured && (
                 <div className="alert">
-                  尚未配置登录：在 Vercel 设置 DASHBOARD_ACCESS_KEY（至少 32
-                  位随机字符）。
+                  {tx(
+                    "尚未配置登录：在 Vercel 设置 DASHBOARD_ACCESS_KEY（至少 32 位随机字符）。",
+                    "Login is not configured. Set DASHBOARD_ACCESS_KEY in Vercel to at least 32 random characters.",
+                  )}
                 </div>
               )}
               <div className="login-note">
-                模拟账户 / 风险管理 / 运行监控
+                {tx("模拟账户 / 风险管理 / 运行监控", "Paper accounts / Risk controls / Operations")}
                 <br />
-                没有模拟收益展示，所有数据均来自已连接的 Worker。
+                {tx(
+                  "没有模拟收益展示，所有数据均来自已连接的 Worker。",
+                  "No fabricated returns. All data comes from the connected Worker.",
+                )}
               </div>
             </section>
           ) : (
@@ -364,19 +473,23 @@ export default function Dashboard() {
               <div className="connection">
                 <span>
                   <i className={`dot ${!stale ? "green" : ""}`} />
-                  {!stale ? "Worker 已连接" : "等待 Worker 连接"}
+                  {!stale
+                    ? tx("Worker 已连接", "Worker connected")
+                    : tx("等待 Worker 连接", "Waiting for Worker")}
                 </span>
                 <span>
-                  15 秒自动同步 ·{" "}
-                  {updated ? `最近同步 ${time(updated)}` : "尚未同步"}
+                  {tx("15 秒自动同步", "Auto-sync every 15 seconds")} ·{" "}
+                  {updated
+                    ? `${tx("最近同步", "Last synced")} ${time(updated, locale)}`
+                    : tx("尚未同步", "Not yet synced")}
                 </span>
-                <span className="badge">仅模拟交易</span>
+                <span className="badge">{tx("仅模拟交易", "PAPER ONLY")}</span>
               </div>
               <div className="account-bar">
                 <label>
-                  账户
+                  {tx("账户", "Account")}
                   <select
-                    aria-label="选择账户"
+                    aria-label={tx("选择账户", "Select account")}
                     value={accountId || snapshot?.accountId || ""}
                     onChange={(e) => {
                       request.current++;
@@ -388,7 +501,7 @@ export default function Dashboard() {
                     }}
                   >
                     <option value="" disabled>
-                      选择模拟账户
+                      {tx("选择模拟账户", "Select a paper account")}
                     </option>
                     {snapshot?.accounts.map((a) => (
                       <option value={a.id} key={a.id}>
@@ -402,7 +515,9 @@ export default function Dashboard() {
                     <span
                       className={`badge ${account.enabled ? "positive" : "muted"}`}
                     >
-                      {account.enabled ? "运行中" : "已暂停"}
+                      {account.enabled
+                        ? tx("运行中", "Running")
+                        : tx("已暂停", "Paused")}
                     </span>
                     <button
                       disabled={disabled}
@@ -412,21 +527,32 @@ export default function Dashboard() {
                         })
                       }
                     >
-                      {account.enabled ? "暂停账户" : "启动模拟账户"}
+                      {account.enabled
+                        ? tx("暂停账户", "Pause account")
+                        : tx("启动模拟账户", "Start paper account")}
                     </button>
                     <small className="mono">
-                      {account.walletAddress || "未关联钱包 · 模拟资金"}
+                      {account.walletAddress ||
+                        tx("未关联钱包 · 模拟资金", "No wallet linked · Paper funds")}
                     </small>
                   </>
                 )}
               </div>
               {!snapshot ? (
                 <div className="panel empty">
-                  <h2>等待真实运行数据</h2>
+                  <h2>{tx("等待真实运行数据", "Waiting for live operational data")}</h2>
                   <p>
-                    连接持久化 Worker 后，账户、策略、市场和运行指标将在此显示。
+                    {tx(
+                      "连接持久化 Worker 后，账户、策略、市场和运行指标将在此显示。",
+                      "Accounts, strategies, markets, and runtime metrics appear after a persistent Worker is connected.",
+                    )}
                   </p>
-                  <p>Next.js 服务在线不代表交易引擎已就绪。</p>
+                  <p>
+                    {tx(
+                      "Next.js 服务在线不代表交易引擎已就绪。",
+                      "An online Next.js service does not mean the trading engine is ready.",
+                    )}
+                  </p>
                 </div>
               ) : (
                 <>
@@ -435,24 +561,24 @@ export default function Dashboard() {
                       <div className="stats">
                         {[
                           [
-                            "已实现盈亏",
+                            tx("已实现盈亏", "Realized P&L"),
                             snapshot.pnl?.realizedPnl,
-                            "结算后净收益，已扣费用",
+                            tx("结算后净收益，已扣费用", "Net settled return after fees"),
                           ],
                           [
-                            "可用资金",
+                            tx("可用资金", "Available funds"),
                             snapshot.pnl?.cash,
-                            "USDT · 模拟账户现金",
+                            tx("USDT · 模拟账户现金", "USDT · Paper account cash"),
                           ],
                           [
-                            "持仓占用",
+                            tx("持仓占用", "Committed capital"),
                             snapshot.pnl?.committed,
-                            "未结算成本 + 费用",
+                            tx("未结算成本 + 费用", "Unsettled cost + fees"),
                           ],
                           [
-                            "累计费用",
+                            tx("累计费用", "Total fees"),
                             snapshot.pnl?.fees,
-                            `${snapshot.pnl?.fills ?? 0} 笔成交`,
+                            `${snapshot.pnl?.fills ?? 0} ${tx("笔成交", "fills")}`,
                           ],
                         ].map(([title, value, note], i) => (
                           <section className="panel stat" key={String(title)}>
@@ -465,7 +591,9 @@ export default function Dashboard() {
                                 i === 0 && Number(value) > 0 ? "profit" : ""
                               }
                             >
-                              {typeof value === "number" ? money(value) : "—"}
+                              {typeof value === "number"
+                                ? money(value, locale)
+                                : "—"}
                               <small> USDT</small>
                             </strong>
                             <p>{note}</p>
@@ -475,15 +603,15 @@ export default function Dashboard() {
                       <div className="two-col">
                         <section className="panel">
                           <div className="panel-title">
-                            <h2>执行概况</h2>
-                            <span className="badge">实时状态</span>
+                            <h2>{tx("执行概况", "Execution overview")}</h2>
+                            <span className="badge">{tx("实时状态", "LIVE STATUS")}</span>
                           </div>
                           <div className="metric-row">
-                            <span>活跃市场</span>
+                            <span>{tx("活跃市场", "Active markets")}</span>
                             <strong>{snapshot.obs.activeMarkets}</strong>
                           </div>
                           <div className="metric-row">
-                            <span>过期订单簿</span>
+                            <span>{tx("过期订单簿", "Stale order books")}</span>
                             <strong
                               className={
                                 snapshot.obs.staleBooks ? "warning" : ""
@@ -493,50 +621,56 @@ export default function Dashboard() {
                             </strong>
                           </div>
                           <div className="metric-row">
-                            <span>已启用策略槽位</span>
+                            <span>{tx("已启用策略槽位", "Enabled strategy slots")}</span>
                             <strong>
                               {snapshot.selected.length} /{" "}
                               {snapshot.slots.length}
                             </strong>
                           </div>
                           <div className="metric-row">
-                            <span>未实现盈亏</span>
+                            <span>{tx("未实现盈亏", "Unrealized P&L")}</span>
                             <strong>—</strong>
                           </div>
                           <p className="footnote">
-                            未提供可执行平仓估值，未实现盈亏不计为零。模拟成交不能代表实盘收益。
+                            {tx(
+                              "未提供可执行平仓估值，未实现盈亏不计为零。模拟成交不能代表实盘收益。",
+                              "No executable close valuation is available, so unrealized P&L is not treated as zero. Paper fills do not represent live returns.",
+                            )}
                           </p>
                         </section>
                         <section className="panel">
                           <div className="panel-title">
-                            <h2>运行检查</h2>
+                            <h2>{tx("运行检查", "Readiness checks")}</h2>
                             <span
                               className={`badge ${snapshot.obs.readiness === "ready" ? "positive" : ""}`}
                             >
                               {snapshot.obs.readiness === "ready"
-                                ? "就绪"
-                                : "需要关注"}
+                                ? tx("就绪", "Ready")
+                                : tx("需要关注", "Attention needed")}
                             </span>
                           </div>
                           {snapshot.obs.reasons.length ? (
                             snapshot.obs.reasons.map((r) => (
                               <div className="check" key={r}>
                                 <span className="warning">△</span>
-                                {labels[r] ?? r}
+                                {label(r)}
                               </div>
                             ))
                           ) : (
                             <div className="check">
-                              ✓ 引擎和市场数据检查通过
+                              ✓ {tx("引擎和市场数据检查通过", "Engine and market-data checks passed")}
                             </div>
                           )}
                           <p className="footnote">
-                            就绪检查仅覆盖运行健康度，实盘仍处于关闭状态。
+                            {tx(
+                              "就绪检查仅覆盖运行健康度，实盘仍处于关闭状态。",
+                              "Readiness covers runtime health only. Live trading remains disabled.",
+                            )}
                           </p>
                         </section>
                       </div>
                       <section className="panel">
-                        <h2>新建模拟账户</h2>
+                        <h2>{tx("新建模拟账户", "Create paper account")}</h2>
                         <form
                           className="inline-form"
                           onSubmit={(e) => {
@@ -549,16 +683,16 @@ export default function Dashboard() {
                           }}
                         >
                           <label>
-                            账户名称
+                            {tx("账户名称", "Account name")}
                             <input
                               name="name"
                               required
                               maxLength={80}
-                              placeholder="例如：BTC 趋势策略"
+                              placeholder={tx("例如：BTC 趋势策略", "Example: BTC trend strategy")}
                             />
                           </label>
                           <label>
-                            初始资金（USDT）
+                            {tx("初始资金（USDT）", "Initial equity (USDT)")}
                             <input
                               name="equity"
                               type="number"
@@ -569,13 +703,13 @@ export default function Dashboard() {
                             />
                           </label>
                           <button className="primary" disabled={disabled}>
-                            创建暂停账户
+                            {tx("创建暂停账户", "Create paused account")}
                           </button>
                         </form>
                       </section>
                       {account && (
                         <section className="panel" key={account.id}>
-                          <h2>风险参数</h2>
+                          <h2>{tx("风险参数", "Risk parameters")}</h2>
                           <form
                             className="inline-form"
                             onSubmit={(e) => {
@@ -591,25 +725,25 @@ export default function Dashboard() {
                           >
                             {[
                               [
-                                "单市场风险 %",
+                                tx("单市场风险 %", "Per-market risk %"),
                                 "market",
                                 account.maxMarketRisk * 100,
                                 1,
                               ],
                               [
-                                "总风险 %",
+                                tx("总风险 %", "Total risk %"),
                                 "total",
                                 account.maxTotalRisk * 100,
                                 5,
                               ],
                               [
-                                "日亏损限额 %",
+                                tx("日亏损限额 %", "Daily loss limit %"),
                                 "daily",
                                 account.dailyLossLimit * 100,
                                 5,
                               ],
                               [
-                                "每市场目标份额",
+                                tx("每市场目标份额", "Target shares per market"),
                                 "shares",
                                 account.fixedShares,
                                 10000,
@@ -628,7 +762,9 @@ export default function Dashboard() {
                                 />
                               </label>
                             ))}
-                            <button disabled={disabled}>保存风险参数</button>
+                            <button disabled={disabled}>
+                              {tx("保存风险参数", "Save risk parameters")}
+                            </button>
                           </form>
                         </section>
                       )}
@@ -638,8 +774,13 @@ export default function Dashboard() {
                     <section className="panel">
                       <div className="panel-title">
                         <div>
-                          <h2>策略槽位</h2>
-                          <p>置信分数不是胜率。缺少源定义的策略禁止启用。</p>
+                          <h2>{tx("策略槽位", "Strategy slots")}</h2>
+                          <p>
+                            {tx(
+                              "置信分数不是胜率。缺少源定义的策略禁止启用。",
+                              "Confidence scores are not win probabilities. Strategies with missing source definitions cannot be enabled.",
+                            )}
+                          </p>
                         </div>
                         <button
                           className="primary"
@@ -655,7 +796,7 @@ export default function Dashboard() {
                               );
                               dirtyRef.current = false;
                               setDirty(false);
-                              setNotice("策略已保存；仅影响新意图。");
+                              setNotice("strategy_saved");
                               await refresh();
                             } catch (e) {
                               setError((e as Error).message);
@@ -664,18 +805,18 @@ export default function Dashboard() {
                             }
                           }}
                         >
-                          保存策略 {dirty ? "•" : ""}
+                          {tx("保存策略", "Save strategies")} {dirty ? "•" : ""}
                         </button>
                       </div>
                       <div className="table-wrap">
                         <table>
                           <thead>
                             <tr>
-                              <th>启用</th>
-                              <th>策略</th>
-                              <th>标的 / 周期</th>
-                              <th>阈值</th>
-                              <th>状态</th>
+                              <th>{tx("启用", "Enabled")}</th>
+                              <th>{tx("策略", "Strategy")}</th>
+                              <th>{tx("标的 / 周期", "Symbol / interval")}</th>
+                              <th>{tx("阈值", "Threshold")}</th>
+                              <th>{tx("状态", "Status")}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -683,7 +824,7 @@ export default function Dashboard() {
                               <tr key={s.id}>
                                 <td>
                                   <input
-                                    aria-label={`策略 ${s.id}`}
+                                    aria-label={`${tx("策略", "Strategy")} ${s.id}`}
                                     type="checkbox"
                                     checked={selection.includes(s.id)}
                                     disabled={
@@ -718,10 +859,12 @@ export default function Dashboard() {
                                       className="warning"
                                       title={s.blockedReason}
                                     >
-                                      源定义缺失
+                                      {tx("源定义缺失", "Source definition missing")}
                                     </span>
                                   ) : (
-                                    <span className="badge positive">可用</span>
+                                    <span className="badge positive">
+                                      {tx("可用", "Available")}
+                                    </span>
                                   )}
                                 </td>
                               </tr>
@@ -730,7 +873,7 @@ export default function Dashboard() {
                         </table>
                       </div>
                       <details>
-                        <summary>最近特征与信号</summary>
+                        <summary>{tx("最近特征与信号", "Recent features and signals")}</summary>
                         <pre>{JSON.stringify(snapshot.features, null, 2)}</pre>
                       </details>
                     </section>
@@ -738,29 +881,35 @@ export default function Dashboard() {
                   {tab === 2 && (
                     <section className="panel">
                       <div className="panel-title">
-                        <h2>已审核市场</h2>
-                        <span>{snapshot.markets.length} 个市场</span>
+                        <h2>{tx("已审核市场", "Approved markets")}</h2>
+                        <span>
+                          {snapshot.markets.length} {tx("个市场", "markets")}
+                        </span>
                       </div>
                       <p className="footnote">
-                        市场需通过 Worker API
-                        审核注册；自动发现结果不会直接参与交易。订单簿超过 1
-                        秒视为过期。
+                        {tx(
+                          "市场需通过 Worker API 审核注册；自动发现结果不会直接参与交易。订单簿超过 1 秒视为过期。",
+                          "Markets must be reviewed and registered through the Worker API. Discovery results never trade automatically. Order books older than one second are stale.",
+                        )}
                       </p>
                       {!snapshot.markets.length ? (
                         <div className="empty">
-                          没有已注册市场，当前不会产生交易。
+                          {tx(
+                            "没有已注册市场，当前不会产生交易。",
+                            "No markets are registered, so no trades can be created.",
+                          )}
                         </div>
                       ) : (
                         <div className="table-wrap">
                           <table>
                             <thead>
                               <tr>
-                                <th>市场</th>
-                                <th>周期</th>
-                                <th>状态</th>
-                                <th>结束时间</th>
-                                <th>盘口时效</th>
-                                <th>盘口</th>
+                                <th>{tx("市场", "Market")}</th>
+                                <th>{tx("周期", "Interval")}</th>
+                                <th>{tx("状态", "Status")}</th>
+                                <th>{tx("结束时间", "End time")}</th>
+                                <th>{tx("盘口时效", "Book age")}</th>
+                                <th>{tx("盘口", "Order book")}</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -783,7 +932,7 @@ export default function Dashboard() {
                                         ? "EXPIRED"
                                         : m.status}
                                     </td>
-                                    <td>{time(m.end)}</td>
+                                    <td>{time(m.end, locale)}</td>
                                     <td
                                       className={
                                         age === null || age > 1000
@@ -792,7 +941,7 @@ export default function Dashboard() {
                                       }
                                     >
                                       {age === null
-                                        ? "无数据"
+                                        ? tx("无数据", "No data")
                                         : `${(age / 1000).toFixed(1)}s`}
                                     </td>
                                     <td>
@@ -810,7 +959,7 @@ export default function Dashboard() {
                                           }
                                         }}
                                       >
-                                        查看
+                                        {tx("查看", "View")}
                                       </button>
                                     </td>
                                   </tr>
@@ -823,7 +972,8 @@ export default function Dashboard() {
                       {book && (
                         <details open>
                           <summary>
-                            YES 方向盘口 · {book.id}（手动快照）
+                            {tx("YES 方向盘口", "YES-side order book")} · {book.id}
+                            {tx("（手动快照）", " (manual snapshot)")}
                           </summary>
                           <pre>{JSON.stringify(book.data, null, 2)}</pre>
                         </details>
@@ -833,7 +983,7 @@ export default function Dashboard() {
                   {tab === 3 && (
                     <>
                       <section className="panel">
-                        <h2>未结算持仓</h2>
+                        <h2>{tx("未结算持仓", "Open positions")}</h2>
                         <DataTable
                           rows={snapshot.positions}
                           columns={[
@@ -843,13 +993,16 @@ export default function Dashboard() {
                             "cost",
                             "fees",
                           ]}
+                          locale={locale}
                         />
                       </section>
                       <section className="panel">
-                        <h2>成交账本</h2>
+                        <h2>{tx("成交账本", "Fill ledger")}</h2>
                         <p className="footnote">
-                          按时间升序显示前 50 笔，完整历史可通过游标 API
-                          查询。金额单位 USDT。
+                          {tx(
+                            "按时间升序显示前 50 笔，完整历史可通过游标 API 查询。金额单位 USDT。",
+                            "Shows the first 50 fills in chronological order. Query the cursor API for complete history. Amounts are in USDT.",
+                          )}
                         </p>
                         <DataTable
                           rows={snapshot.fills}
@@ -862,6 +1015,7 @@ export default function Dashboard() {
                             "pnl",
                             "time",
                           ]}
+                          locale={locale}
                         />
                       </section>
                     </>
@@ -870,7 +1024,7 @@ export default function Dashboard() {
                     <>
                       <div className="stats">
                         <section className="panel stat">
-                          <div>引擎单轮耗时</div>
+                          <div>{tx("引擎单轮耗时", "Engine tick duration")}</div>
                           <strong>
                             {snapshot.obs.runtime?.lastTickMs?.toFixed(2) ??
                               "—"}
@@ -878,34 +1032,37 @@ export default function Dashboard() {
                           </strong>
                         </section>
                         <section className="panel stat">
-                          <div>引擎累计异常</div>
+                          <div>{tx("引擎累计异常", "Engine errors")}</div>
                           <strong>
                             {snapshot.obs.runtime?.engineErrors ?? "—"}
                           </strong>
                         </section>
                         <section className="panel stat">
-                          <div>行情采集</div>
+                          <div>{tx("行情采集", "Market collector")}</div>
                           <strong>
                             {snapshot.obs.runtime?.collectorEnabled
-                              ? "已开启"
-                              : "未开启"}
+                              ? tx("已开启", "Enabled")
+                              : tx("未开启", "Disabled")}
                           </strong>
                         </section>
                         <section className="panel stat">
-                          <div>K 线数据源</div>
+                          <div>{tx("K 线数据源", "Candle feeds")}</div>
                           <strong>{snapshot.obs.candleFeeds.length}</strong>
                         </section>
                       </div>
                       <section className="panel">
-                        <h2>最近运行事件</h2>
+                        <h2>{tx("最近运行事件", "Recent runtime events")}</h2>
                         <p className="footnote">
-                          最新 50 条非订单簿事件 · 时间为本地时区
+                          {tx(
+                            "最新 50 条非订单簿事件 · 时间为本地时区",
+                            "Latest 50 non-order-book events · Times use your local timezone",
+                          )}
                         </p>
                         {snapshot.obs.events.length ? (
                           snapshot.obs.events.map((e) => (
                             <details key={e.seq} className="event">
                               <summary>
-                                <span className="mono">{time(e.time)}</span>
+                                <span className="mono">{time(e.time, locale)}</span>
                                 <span>{e.type}</span>
                                 <small>#{e.seq}</small>
                               </summary>
@@ -913,14 +1070,15 @@ export default function Dashboard() {
                             </details>
                           ))
                         ) : (
-                          <div className="empty">暂无事件</div>
+                          <div className="empty">{tx("暂无事件", "No events")}</div>
                         )}
                       </section>
                       <section className="panel">
-                        <h2>K 线历史状态</h2>
+                        <h2>{tx("K 线历史状态", "Candle history status")}</h2>
                         <DataTable
                           rows={snapshot.obs.candleFeeds as unknown as Row[]}
                           columns={["id", "bars", "latest"]}
+                          locale={locale}
                         />
                       </section>
                     </>
@@ -933,14 +1091,40 @@ export default function Dashboard() {
             <span>
               Predict Control Room <span className="muted-text">/ v0.1</span>
             </span>
-            <span>模拟交易 · 数据可追溯 · 风险有边界</span>
+            <span>
+              {tx(
+                "模拟交易 · 数据可追溯 · 风险有边界",
+                "Paper trading · Traceable data · Bounded risk",
+              )}
+            </span>
           </footer>
         </div>
       </main>
     </div>
   );
 }
-function DataTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
+function DataTable({
+  rows,
+  columns,
+  locale,
+}: {
+  rows: Row[];
+  columns: string[];
+  locale: Locale;
+}) {
+  const names: Record<string, Record<Locale, string>> = {
+    market: { en: "Market", zh: "市场" },
+    direction: { en: "Direction", zh: "方向" },
+    quantity: { en: "Shares", zh: "份额" },
+    cost: { en: "Cost", zh: "成本" },
+    fees: { en: "Fees", zh: "费用" },
+    fee: { en: "Fee", zh: "费用" },
+    pnl: { en: "Realized P&L", zh: "已实现盈亏" },
+    time: { en: "Time", zh: "时间" },
+    id: { en: "Feed", zh: "数据源" },
+    bars: { en: "Candles", zh: "K 线数" },
+    latest: { en: "Latest candle start", zh: "最新 K 线起点" },
+  };
   return rows.length ? (
     <div className="table-wrap">
       <table>
@@ -948,21 +1132,7 @@ function DataTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
           <tr>
             {columns.map((c) => (
               <th key={c}>
-                {(
-                  {
-                    market: "市场",
-                    direction: "方向",
-                    quantity: "份额",
-                    cost: "成本",
-                    fees: "费用",
-                    fee: "费用",
-                    pnl: "已实现盈亏",
-                    time: "时间",
-                    id: "数据源",
-                    bars: "K 线数",
-                    latest: "最新 K 线起点",
-                  } as Record<string, string>
-                )[c] ?? c}
+                {names[c]?.[locale] ?? c}
               </th>
             ))}
           </tr>
@@ -975,9 +1145,9 @@ function DataTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
                   {row[c] === null || row[c] === undefined
                     ? "—"
                     : c === "time" || c === "latest"
-                      ? time(Number(row[c]))
+                      ? time(Number(row[c]), locale)
                       : typeof row[c] === "number"
-                        ? money(row[c] as number)
+                        ? money(row[c] as number, locale)
                         : String(row[c])}
                 </td>
               ))}
@@ -987,6 +1157,10 @@ function DataTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
       </table>
     </div>
   ) : (
-    <div className="empty">暂无记录。策略触发并完成模拟执行后显示。</div>
+    <div className="empty">
+      {locale === "zh"
+        ? "暂无记录。策略触发并完成模拟执行后显示。"
+        : "No records yet. Results appear after a strategy triggers and completes a paper execution."}
+    </div>
   );
 }

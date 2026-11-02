@@ -6,6 +6,7 @@ import {
   login,
   logout,
   proxy,
+  sameOrigin,
   session,
   authenticated,
   allowed,
@@ -35,6 +36,32 @@ test("Next gateway integrates with real worker: login, scopes, account, strategi
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   try {
+    const proxiedLocal = new Request(
+      "http://127.0.0.1:3001/api/session",
+      {
+        headers: {
+          origin: "http://198.18.0.222:3001",
+          host: "127.0.0.1:3001",
+          "x-forwarded-host": "198.18.0.222:3001",
+          "x-forwarded-proto": "http",
+          "sec-fetch-site": "same-origin",
+        },
+      },
+    );
+    assert.equal(sameOrigin(proxiedLocal), true);
+    assert.equal(
+      sameOrigin(
+        new Request("http://127.0.0.1:3001/api/session", {
+          headers: {
+            origin: "https://evil.example",
+            "x-forwarded-host": "evil.example",
+            "x-forwarded-proto": "https",
+            "sec-fetch-site": "cross-site",
+          },
+        }),
+      ),
+      false,
+    );
     assert.equal(
       (await proxy(req("accounts", "GET", undefined, ""), "accounts", c))
         .status,

@@ -9,7 +9,8 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "npx tsx e2e/worker.ts",
+      command:
+        "node --import ./tests/tsx-userinfo-shim.mjs --import tsx e2e/worker.ts",
       url: "http://127.0.0.1:3100/health",
       reuseExistingServer: false,
       timeout: 30000,
