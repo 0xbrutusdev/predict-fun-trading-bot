@@ -24,24 +24,38 @@ type Run = {
   decisionPrice?: number;
   nextAttempt?: number;
   target: number;
+  configRevision?: number;
+  strategyVersion?: string;
+  executionPolicy?: string;
 };
+function phaseAt(duration: 300 | 900, elapsedMs: number): Phase {
+  if (duration === 300)
+    return elapsedMs <= 11000 ? "t1" : elapsedMs <= 218000 ? "late" : "done";
+  return elapsedMs <= 95000
+    ? "t1"
+    : elapsedMs <= 140000
+      ? "t2"
+      : elapsedMs <= 230000
+        ? "t3"
+        : "done";
+}
 export class Engine {
   constructor(readonly store: Store) {}
-  step(now = Date.now()) {
-    for (const a of this.store
-      .list<Account>("account")
-      .filter((a) => a.enabled))
-      for (const m of this.store
-        .list<Market>("market")
-        .filter((m) => m.status === "OPEN" && m.start <= now && now < m.end)) {
+  async step(now = Date.now()) {
+    for (const a of (await this.store.list<Account>("account")).filter(
+      (a) => a.enabled,
+    ))
+      for (const m of (await this.store.list<Market>("market")).filter(
+        (m) => m.status === "OPEN" && m.start <= now && now < m.end,
+      )) {
         const key = `${a.id}:${m.id}`;
-        let run = this.store.get<Run>("run", key);
+        let run = await this.store.get<Run>("run", key);
         try {
           if (!run) {
-            const conf = this.store.get<{ enabledSlots: string[] }>(
-              "config",
-              a.id,
-            );
+            const conf = await this.store.get<{
+              enabledSlots: string[];
+              revision?: number;
+            }>("config", a.id);
             const chosen = slots.filter(
               (s) =>
                 s.symbol === m.symbol &&
@@ -51,31 +65,34 @@ export class Engine {
             );
             if (!chosen.length) continue;
             const all =
-              this.store.get<Candle[]>(
+              (await this.store.get<Candle[]>(
                 "candles",
                 `${m.symbol}:${m.duration}`,
-              ) || [];
+              )) || [];
             const f = features(closedBars(all, m.duration, m.start));
             const one =
-              this.store.get<Candle[]>("candles", `${m.symbol}:60`) || [];
+              (await this.store.get<Candle[]>("candles", `${m.symbol}:60`)) ||
+              [];
             const mic = micro(one, m.start - m.duration * 1000, m.duration);
             const h1 =
-              this.store.get<Candle[]>("candles", `${m.symbol}:3600`) || [];
+              (await this.store.get<Candle[]>("candles", `${m.symbol}:3600`)) ||
+              [];
             const cutoff =
               Math.floor((m.start - m.duration * 1000) / 3600000) * 3600000;
             let h: ReturnType<typeof features> | undefined;
             try {
               h = features(closedBars(h1, 3600, cutoff));
             } catch {}
-            const signals = chosen.flatMap((s) => {
+            const signals = [];
+            for (const s of chosen) {
               try {
                 const sig = evaluate(s.strategy, f, s.symbol, {
                   micro: mic,
                   h1: h,
                 });
-                return sig.confidence >= s.threshold ? [sig] : [];
+                if (sig.confidence >= s.threshold) signals.push(sig);
               } catch (e) {
-                this.store.event(
+                await this.store.event(
                   "signal.blocked",
                   {
                     accountId: a.id,
@@ -85,10 +102,9 @@ export class Engine {
                   },
                   now,
                 );
-                return [];
               }
-            });
-            this.store.put("features", key, {
+            }
+            await this.store.put("features", key, {
               time: now,
               marketId: m.id,
               accountId: a.id,
@@ -99,49 +115,55 @@ export class Engine {
               !signals.length ||
               new Set(signals.map((s) => s.direction)).size > 1
             ) {
-              this.store.put("run", key, {
+              await this.store.put("run", key, {
                 phase: "done",
                 reason: signals.length ? "direction_conflict" : "no_signal",
               });
               continue;
             }
             run = {
-              phase: "t1",
+              phase: phaseAt(m.duration, now - m.start),
               direction: signals[0].direction,
               members: signals.map((s) => s.strategy).sort(),
               filled: 0,
               attempt: 0,
               target: a.fixedShares,
+              configRevision: conf?.revision ?? 0,
+              strategyVersion: "reference-ct4-v1",
+              executionPolicy: "predict-paper-ct4-v2",
             };
-            this.store.put("run", key, run);
+            await this.store.put("run", key, run);
           }
           if (run.phase === "done") continue;
-          run.filled = Number(
-            (
-              this.store.db
-                .prepare(
-                  "SELECT COALESCE(SUM(quantity),0) quantity FROM fills WHERE account=? AND market=? AND direction=?",
-                )
-                .get(a.id, m.id, run.direction) as any
-            ).quantity,
+          run.filled = await this.store.sumFilledQuantity(
+            a.id,
+            m.id,
+            run.direction,
           );
           if (run.filled >= run.target) {
             run.phase = "done";
-            this.store.put("run", key, run);
+            await this.store.put("run", key, run);
             continue;
           }
           const t = checkpoint(m.duration, run.phase),
             at = m.start + t * 1000;
-          const history = this.store.get<Book[]>("books", m.id) || [];
+          const history = (await this.store.get<Book[]>("books", m.id)) || [];
           if (now < at) continue;
           if (now > at + (m.duration === 300 ? 8000 : 20000)) {
-            run.phase = "done";
-            this.store.event(
+            const expiredPhase = run.phase,
+              future = phaseAt(m.duration, now - m.start);
+            run.phase = future === expiredPhase ? "done" : future;
+            await this.store.event(
               "checkpoint.skipped",
-              { key, reason: "late" },
+              {
+                key,
+                phase: expiredPhase,
+                reason: "late",
+                next: run.phase,
+              },
               now,
             );
-            this.store.put("run", key, run);
+            await this.store.put("run", key, run);
             continue;
           }
           const book = history.filter((b) => b.receivedAt <= now).at(-1);
@@ -187,7 +209,7 @@ export class Engine {
                 0.95,
                 Math.round((current + m.tick) / m.tick) * m.tick,
               );
-              const result = paperFill(
+              const result = await paperFill(
                 this.store,
                 a.id,
                 m,
@@ -199,7 +221,7 @@ export class Engine {
                 now,
               );
               run.filled += result.quantity;
-              this.store.event(
+              await this.store.event(
                 "checkpoint.decision",
                 { key, phase: run.phase, samples, limit, result },
                 now,
@@ -208,7 +230,7 @@ export class Engine {
             run.attempt++;
             if (run.filled < run.target && run.attempt < 4) {
               run.nextAttempt = now + 1000;
-              this.store.put("run", key, run);
+              await this.store.put("run", key, run);
               continue;
             }
           }
@@ -216,13 +238,23 @@ export class Engine {
           run.attempt = 0;
           delete run.nextAttempt;
           delete run.decisionPrice;
-          this.store.put("run", key, run);
+          await this.store.put("run", key, run);
         } catch (e) {
           const message = String(e);
-          const previous = this.store.get<{ reason: string }>("lastError", key);
+          const previous = await this.store.get<{ reason: string }>(
+            "lastError",
+            key,
+          );
           if (previous?.reason !== message) {
-            this.store.event("engine.skip", { key, reason: message }, now);
-            this.store.put("lastError", key, { reason: message, time: now });
+            await this.store.event(
+              "engine.skip",
+              { key, reason: message },
+              now,
+            );
+            await this.store.put("lastError", key, {
+              reason: message,
+              time: now,
+            });
           }
         }
       }

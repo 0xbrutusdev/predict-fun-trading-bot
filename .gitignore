@@ -7,7 +7,9 @@ coverage/
 *.log
 
 __pycache__/
-/PREDICT_FUN_IMPLEMENTATION_PLAN.md
+.venv/
+*.pyc
+# Local planning, review, API, and validation documents.
 /docs/
 web/.next/
 web/.env*

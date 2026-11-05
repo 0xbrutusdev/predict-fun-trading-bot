@@ -5,12 +5,37 @@ type Config = {
   token?: string;
   key?: string;
   production?: boolean;
+  tenants?: Record<
+    string,
+    {
+      tenantId: string;
+      url: string;
+      token: string;
+      role?: "viewer" | "trader" | "admin";
+    }
+  >;
 };
+export type Principal = {
+  id?: string;
+  email?: string | null;
+  tenantId?: string;
+};
+function tenantRegistry() {
+  const raw = process.env.BOT_TENANTS_JSON;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Config["tenants"];
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export const config = (): Config => ({
   url: process.env.BOT_API_URL,
   token: process.env.BOT_API_TOKEN,
   key: process.env.DASHBOARD_ACCESS_KEY,
   production: process.env.NODE_ENV === "production",
+  tenants: tenantRegistry(),
 });
 const cookieName = "predict_session";
 const equal = (a: string, b: string) =>
@@ -52,6 +77,16 @@ export function json(
 }
 const error = (code: string, status: number, requestId?: string) =>
   json({ error: { code, requestId } }, status);
+function tenantTarget(c: Config, principal: Principal) {
+  const identities = [principal.email, principal.id]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim().toLowerCase());
+  for (const identity of identities) {
+    const target = c.tenants?.[identity];
+    if (target) return target;
+  }
+  return undefined;
+}
 export function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin || req.headers.get("sec-fetch-site") === "cross-site")
@@ -114,7 +149,7 @@ export function logout(req: Request, c = config()) {
 // Explicit allowlist: never let a browser turn this into an arbitrary bearer-token proxy.
 export function allowed(path: string, method: string) {
   if (method === "GET")
-    return /^(status|observability|strategies|accounts|markets|markets\/discovery|events|accounts\/[\w:-]+(?:\/(strategies|features|positions|fills|pnl))?|markets\/[\w:-]+\/book)$/.test(
+    return /^(status|observability|strategies|accounts|markets|markets\/(discovery|automation)|events|accounts\/[\w:-]+(?:\/(strategies|features|positions|fills|pnl))?|markets\/[\w:-]+\/book)$/.test(
       path,
     );
   if (method === "POST") return path === "accounts" || path === "kill-switch";
@@ -127,19 +162,28 @@ export async function proxy(
   path: string,
   c = config(),
   fetcher: typeof fetch = fetch,
+  principal?: Principal,
 ) {
   const requestId = randomUUID(),
     started = Date.now();
-  if (!authenticated(req, c)) return error("unauthorized", 401, requestId);
+  const tenant = principal ? tenantTarget(c, principal) : undefined;
+  if (principal && !tenant)
+    return error("tenant_not_configured", 403, requestId);
+  if (!principal && !authenticated(req, c))
+    return error("unauthorized", 401, requestId);
+  if (tenant?.role === "viewer" && req.method !== "GET")
+    return error("read_only", 403, requestId);
   if (!allowed(path, req.method))
     return error("route_not_allowed", 404, requestId);
   if (req.method !== "GET" && !sameOrigin(req))
     return error("origin_rejected", 403, requestId);
-  if (!c.url || !c.token || c.token.length < 32)
+  const url = tenant?.url ?? c.url,
+    token = tenant?.token ?? c.token;
+  if (!url || !token || token.length < 32)
     return error("worker_not_configured", 503, requestId);
   let status = 502;
   try {
-    const base = new URL(c.url);
+    const base = new URL(url);
     if (
       base.username ||
       base.password ||
@@ -168,7 +212,7 @@ export async function proxy(
     const upstream = await fetcher(target, {
       method: req.method,
       headers: {
-        authorization: `Bearer ${c.token}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         "x-request-id": requestId,
       },

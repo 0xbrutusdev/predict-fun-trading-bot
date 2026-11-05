@@ -36,18 +36,15 @@ test("Next gateway integrates with real worker: login, scopes, account, strategi
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   try {
-    const proxiedLocal = new Request(
-      "http://127.0.0.1:3001/api/session",
-      {
-        headers: {
-          origin: "http://198.18.0.222:3001",
-          host: "127.0.0.1:3001",
-          "x-forwarded-host": "198.18.0.222:3001",
-          "x-forwarded-proto": "http",
-          "sec-fetch-site": "same-origin",
-        },
+    const proxiedLocal = new Request("http://127.0.0.1:3001/api/session", {
+      headers: {
+        origin: "http://198.18.0.222:3001",
+        host: "127.0.0.1:3001",
+        "x-forwarded-host": "198.18.0.222:3001",
+        "x-forwarded-proto": "http",
+        "sec-fetch-site": "same-origin",
       },
-    );
+    });
     assert.equal(sameOrigin(proxiedLocal), true);
     assert.equal(
       sameOrigin(
@@ -107,6 +104,7 @@ test("Next gateway integrates with real worker: login, scopes, account, strategi
     );
     assert.equal(allowed("../health", "GET"), false);
     assert.equal(allowed("markets", "POST"), false);
+    assert.equal(allowed("markets/automation", "GET"), true);
     const created = await proxy(
       req("accounts", "POST", { name: "integration", initialEquity: 10000 }),
       "accounts",
@@ -190,4 +188,73 @@ test("Next gateway integrates with real worker: login, scopes, account, strategi
     await app.close();
     store.close();
   }
+});
+test("an Auth.js principal is routed only to its configured tenant Worker", async () => {
+  const token = "tenant-worker-token-000000000000000000",
+    c = {
+      tenants: {
+        "trader@example.com": {
+          tenantId: "tenant-a",
+          url: "https://tenant-a.example/",
+          token,
+        },
+      },
+      production: true,
+    },
+    request = new Request("https://dashboard.example/api/bot/accounts"),
+    calls: { url?: string; authorization?: string } = {};
+  const response = await proxy(
+    request,
+    "accounts",
+    c,
+    async (input, init) => {
+      calls.url = String(input);
+      calls.authorization =
+        new Headers(init?.headers).get("authorization") ?? "";
+      return Response.json({ data: [] });
+    },
+    { id: "user-1", email: "trader@example.com", tenantId: "tenant-a" },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(calls.url, "https://tenant-a.example/v1/accounts");
+  assert.equal(calls.authorization, `Bearer ${token}`);
+  assert.equal(
+    (
+      await proxy(request, "accounts", c, fetch, {
+        id: "unknown",
+        email: "unknown@example.com",
+        tenantId: "unknown",
+      })
+    ).status,
+    403,
+  );
+  const viewer = {
+    ...c,
+    tenants: {
+      "viewer@example.com": {
+        ...c.tenants["trader@example.com"],
+        tenantId: "tenant-viewer",
+        role: "viewer" as const,
+      },
+    },
+  };
+  assert.equal(
+    (
+      await proxy(
+        new Request("https://dashboard.example/api/bot/kill-switch", {
+          method: "POST",
+          headers: {
+            origin: "https://dashboard.example",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        }),
+        "kill-switch",
+        viewer,
+        fetch,
+        { email: "viewer@example.com", tenantId: "tenant-viewer" },
+      )
+    ).status,
+    403,
+  );
 });

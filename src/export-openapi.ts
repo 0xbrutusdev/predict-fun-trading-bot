@@ -17,5 +17,5 @@ try {
   );
 } finally {
   await app.close();
-  store.close();
+  await store.close();
 }

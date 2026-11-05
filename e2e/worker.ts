@@ -9,7 +9,7 @@ const app = await createApp(
 await app.listen({ host: "127.0.0.1", port: 3100 });
 async function close() {
   await app.close();
-  store.close();
+  await store.close();
   process.exit(0);
 }
 process.on("SIGTERM", () => void close());

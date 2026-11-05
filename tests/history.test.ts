@@ -39,9 +39,9 @@ test("paged backfill resumes and preserves observation time", async () => {
   const report = await backfill(s, opts, deps);
   assert.equal(report.complete, true);
   assert.deepEqual(cursors, [240000, 120000]);
-  assert.equal(historyAt(s, "BTC", 60, 0, 240000, 599999).length, 0);
-  assert.equal(historyAt(s, "BTC", 60, 0, 240000, 600000).length, 4);
-  s.close();
+  assert.equal((await historyAt(s, "BTC", 60, 0, 240000, 599999)).length, 0);
+  assert.equal((await historyAt(s, "BTC", 60, 0, 240000, 600000)).length, 4);
+  await s.close();
 });
 test("closed flags and invalid OHLC fail safely", () => {
   assert.deepEqual(
@@ -70,5 +70,5 @@ test("empty exchange history reports gap without claiming completion", async () 
   );
   assert.equal(result.missing, 2);
   assert.equal(result.complete, false);
-  s.close();
+  await s.close();
 });

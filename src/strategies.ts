@@ -26,6 +26,7 @@ export const slots = [
   ["SOL", 300, "v7_ultra_conf_a", 0.6],
 ].map(([symbol, duration, strategy, threshold], i) => ({
   id: String(i + 1),
+  key: `${String(symbol).toLowerCase()}:${Number(duration)}:${String(strategy)}`,
   symbol: String(symbol),
   duration: Number(duration),
   strategy: String(strategy),
@@ -178,21 +179,29 @@ export function evaluate(
   switch (name) {
     case "regime_adaptive":
       r =
-        f.adx > 25
-          ? f.bbwidth > 3
-            ? out(f.ema20 > f.ema50, Math.min(f.adx / 50, 1))
-            : out(f.ema20 > f.ema50, 0.3)
-          : f.bbwidth <= 3
-            ? out(f.rsi < 50, Math.min(Math.abs(f.rsi - 50) / 25, 1))
-            : out(
-                f.c < f.bbmid,
-                Math.min((2 * Math.abs(f.c - f.bbmid)) / (f.bbhi - f.bblo), 1),
-              );
+        f.adx <= 0 ||
+        f.bbmid <= 0 ||
+        f.bbhi <= f.bblo ||
+        ![f.adx, f.bbmid, f.bbhi, f.bblo].every(Number.isFinite)
+          ? out(true, 0.1)
+          : f.adx > 25
+            ? f.bbwidth > 3
+              ? out(f.ema20 > f.ema50, Math.min(f.adx / 50, 1))
+              : out(f.ema20 > f.ema50, 0.3)
+            : f.bbwidth <= 3
+              ? out(f.rsi < 50, Math.min(Math.abs(f.rsi - 50) / 25, 1))
+              : out(
+                  f.c < f.bbmid,
+                  Math.min(
+                    (2 * Math.abs(f.c - f.bbmid)) / (f.bbhi - f.bblo),
+                    1,
+                  ),
+                );
       break;
     case "macd_crossover":
       r = out(
         f.hist > 0,
-        f.prevHist !== 0 && f.hist * f.prevHist < 0 ? 0.7 : 0.1,
+        f.prevHist === 0 ? 0 : f.hist * f.prevHist < 0 ? 0.7 : 0.1,
       );
       break;
     case "v2_pin_bar":
@@ -207,6 +216,10 @@ export function evaluate(
             : out(f.c >= f.o, 0.02);
       break;
     case "v2_rsi_shift": {
+      if (f.rsi <= 0 || f.prevRsi <= 0) {
+        r = out(true, 0.02);
+        break;
+      }
       const delta = f.rsi - f.prevRsi;
       r =
         Math.abs(delta) < 5
@@ -357,7 +370,7 @@ export function evaluate(
       if (!ctx.h1 || !ctx.micro) throw Error("h1_and_micro_required");
       const h = ctx.h1,
         t = Math.sign(h.ema20 - h.ema50);
-      if (!t || f.ret * t >= 0) {
+      if (h.rsi <= 0 || !t || f.ret * t >= 0) {
         r = out(t > 0, 0.02);
         break;
       }

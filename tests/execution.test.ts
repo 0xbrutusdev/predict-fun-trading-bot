@@ -24,7 +24,7 @@ const book: Book = {
   asks: [[0.5, 1000]],
   bids: [[0.49, 1000]],
 };
-function setup() {
+async function setup() {
   const s = new Store(":memory:");
   const a: Account = {
     id: "a",
@@ -41,7 +41,7 @@ function setup() {
     paperFeeBps: 200,
     createdAt: 0,
   };
-  s.put("account", "a", a);
+  await s.put("account", "a", a);
   return s;
 }
 test("5m only buys late and requires three samples", () => {
@@ -50,29 +50,53 @@ test("5m only buys late and requires three samples", () => {
   assert.equal(decide(300, "late", [0.7], false).buy, false);
   assert.equal(decide(300, "late", [0.7, 0.7, 0.7], false).buy, true);
 });
+test("missing checkpoint samples advance only to eligible future legs", () => {
+  assert.deepEqual(decide(300, "t1", [0.5, 0.5], false), {
+    buy: false,
+    next: "retry",
+  });
+  assert.deepEqual(decide(300, "retry", [0.5], false), {
+    buy: false,
+    next: "late",
+  });
+  assert.deepEqual(decide(900, "t1", [0.8], false), {
+    buy: false,
+    next: "t2",
+  });
+  assert.deepEqual(decide(900, "t2", [0.8], false), {
+    buy: false,
+    next: "t3",
+  });
+  assert.deepEqual(decide(900, "t3", [0.85], false), {
+    buy: false,
+    next: "done",
+  });
+});
 test("15m boundaries and prior-fill T3 prohibition", () => {
   assert.equal(decide(900, "t1", [0.76, 0.76, 0.76], false).buy, false);
   assert.equal(decide(900, "t1", [0.6, 0.6, 0.6], false).buy, true);
   assert.equal(decide(900, "t3", [0.85, 0.85, 0.85], true).buy, false);
 });
-test("deduplication, conflict prevention, tie settlement conservation", () => {
-  const s = setup();
-  const r = paperFill(s, "a", m, book, "up", 15, 0.51, "key", 210000);
+test("deduplication, conflict prevention, tie settlement conservation", async () => {
+  const s = await setup();
+  const r = await paperFill(s, "a", m, book, "up", 15, 0.51, "key", 210000);
   assert.equal(r.quantity, 15);
   assert.equal(
-    paperFill(s, "a", m, book, "up", 15, 0.51, "key", 210000).status,
+    (await paperFill(s, "a", m, book, "up", 15, 0.51, "key", 210000)).status,
     "duplicate",
   );
-  assert.throws(() =>
+  await assert.rejects(() =>
     paperFill(s, "a", m, book, "down", 15, 0.52, "other", 210000),
   );
-  settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
-  settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
-  assert.equal(s.get<Account>("account", "a")!.cash, 9999.85);
-  s.close();
+  await settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
+  await settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
+  assert.equal((await s.get<Account>("account", "a"))!.cash, 9999.85);
+  await s.close();
 });
-test("stale book cannot trade", () => {
-  const s = setup();
-  assert.throws(() => paperFill(s, "a", m, book, "up", 15, 0.51, "k", 212000));
-  s.close();
+test("stale book cannot trade", async () => {
+  const s = await setup();
+  await assert.rejects(() =>
+    paperFill(s, "a", m, book, "up", 15, 0.51, "k", 212000),
+  );
+  await s.close();
 });

@@ -56,3 +56,27 @@ test("pin bar and crossing thresholds", () => {
     0.7,
   );
 });
+test("source guards suppress invalid edge-state confidence", () => {
+  const f = features(bars);
+  assert.deepEqual(
+    evaluate("v2_rsi_shift", { ...f, rsi: 7.142857, prevRsi: 0 }, "ETH"),
+    { strategy: "v2_rsi_shift", direction: "up", confidence: 0.02 },
+  );
+  assert.equal(
+    evaluate("macd_crossover", { ...f, hist: 0.1, prevHist: 0 }, "SOL")
+      .confidence,
+    0,
+  );
+  assert.deepEqual(evaluate("regime_adaptive", { ...f, adx: 0 }, "BTC"), {
+    strategy: "regime_adaptive",
+    direction: "up",
+    confidence: 0.1,
+  });
+  assert.equal(
+    evaluate("v18_trend_pullback_5m", { ...f, ret: -1 }, "BTC", {
+      h1: { ...f, ema20: 2, ema50: 1, rsi: 0 },
+      micro: { head: 0, pos: 0.5, ret: 0, lastUp: false, last2Up: false },
+    }).confidence,
+    0.02,
+  );
+});

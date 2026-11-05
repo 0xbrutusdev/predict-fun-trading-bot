@@ -6,11 +6,13 @@ type Account = {
   name: string;
   enabled: boolean;
   cash: number;
+  initialEquity: number;
   walletAddress?: string;
   maxMarketRisk: number;
   maxTotalRisk: number;
   dailyLossLimit: number;
   fixedShares: number;
+  revision?: number;
 };
 type Slot = {
   id: string;
@@ -27,6 +29,21 @@ type Market = {
   status: string;
   end: number;
   bookAgeMs: number | null;
+  source?: "manual" | "predict-auto-v1";
+  resolutionProvider?: string;
+  resolutionSource?: string;
+  blockedReason?: string;
+};
+type MarketAutomation = {
+  enabled: boolean;
+  symbols: string[];
+  durations: number[];
+  providers: string[];
+  lastRefreshAt: number | null;
+  discovered: number;
+  eligible: number;
+  registered: number;
+  rejected: number;
 };
 type Pnl = {
   realizedPnl: number;
@@ -55,6 +72,7 @@ type Snapshot = {
   accounts: Account[];
   slots: Slot[];
   markets: Market[];
+  automation: MarketAutomation;
   obs: Observation;
   accountId: string;
   pnl: Pnl | null;
@@ -62,6 +80,7 @@ type Snapshot = {
   fills: Row[];
   features: unknown[];
   selected: string[];
+  configRevision: number;
 };
 type Locale = "en" | "zh";
 const money = (v: number, locale: Locale) =>
@@ -123,18 +142,40 @@ const labels: Record<string, Record<Locale, string>> = {
     en: "Dashboard login is not configured.",
     zh: "控制台登录尚未配置。",
   },
-  engine_heartbeat_missing: { en: "Engine heartbeat missing", zh: "引擎心跳缺失" },
+  tenant_not_configured: {
+    en: "Your identity is not assigned to a trading workspace. Contact the service operator.",
+    zh: "当前身份尚未分配交易工作区，请联系服务运营方。",
+  },
+  engine_heartbeat_missing: {
+    en: "Engine heartbeat missing",
+    zh: "引擎心跳缺失",
+  },
   recent_engine_error: { en: "Recent engine error", zh: "近期引擎错误" },
+  writer_lease_missing: {
+    en: "This Worker does not own the execution lease",
+    zh: "此 Worker 未持有执行租约",
+  },
   collector_disabled: { en: "Market collector disabled", zh: "行情采集未开启" },
   no_active_registered_markets: {
     en: "No active approved markets",
     zh: "没有已审核的活跃市场",
   },
   stale_order_books: { en: "Order books are stale", zh: "订单簿已过期" },
-  recent_collector_error: { en: "Recent collector error", zh: "近期行情采集错误" },
+  recent_collector_error: {
+    en: "Recent collector error",
+    zh: "近期行情采集错误",
+  },
   insufficient_or_stale_candles: {
     en: "Candle history is insufficient or stale",
     zh: "K 线历史不足或已过期",
+  },
+  revision_conflict: {
+    en: "This configuration changed elsewhere. Refresh and review before saving again.",
+    zh: "此配置已在其他位置更新。请刷新并重新检查后再保存。",
+  },
+  historical_settlement_time_unknown: {
+    en: "This account has legacy settlements with unknown timing and cannot be activated until reconciled.",
+    zh: "此账户存在结算时间未知的历史记录，完成对账前无法启动。",
   },
 };
 
@@ -142,6 +183,7 @@ export default function Dashboard() {
   const [locale, setLocale] = useState<Locale>("zh");
   const [auth, setAuth] = useState<boolean | null>(null),
     [configured, setConfigured] = useState(true),
+    [authMode, setAuthMode] = useState<"legacy" | "authjs">("legacy"),
     [key, setKey] = useState("");
   const [tab, setTab] = useState(0),
     [accountId, setAccountId] = useState(""),
@@ -170,6 +212,7 @@ export default function Dashboard() {
     const saved = window.localStorage.getItem("predict_locale");
     const next = saved === "en" || saved === "zh" ? saved : "zh";
     setLocale(next);
+    setAccountId(window.localStorage.getItem("predict_account_id") ?? "");
     document.documentElement.lang = next === "zh" ? "zh-CN" : "en";
   }, []);
   const changeLocale = (next: Locale) => {
@@ -183,55 +226,71 @@ export default function Dashboard() {
       .then((x) => {
         setAuth(x.data.authenticated);
         setConfigured(x.data.configured);
+        setAuthMode(x.data.authMode ?? "legacy");
       })
       .catch(() => {
         setAuth(false);
         setError("dashboard_unreachable");
       });
   }, []);
-  const refresh = useCallback(async () => {
-    const seq = ++request.current;
-    try {
-      const [accounts, slots, markets, obs] = await Promise.all([
-        api<Account[]>("accounts"),
-        api<Slot[]>("strategies"),
-        api<Market[]>("markets"),
-        api<Observation>("observability"),
-      ]);
-      const id = accountId || accounts[0]?.id || "";
-      const [pnl, positions, fills, features, config] = id
-        ? await Promise.all([
-            api<Pnl>(`accounts/${id}/pnl`),
-            api<Row[]>(`accounts/${id}/positions`),
-            api<Row[]>(`accounts/${id}/fills?limit=50`),
-            api<unknown[]>(`accounts/${id}/features`),
-            api<{ enabledSlots: string[] }>(`accounts/${id}/strategies`),
-          ])
-        : [null, [], [], [], { enabledSlots: [] }];
-      if (seq !== request.current) return;
-      setSnapshot({
-        accounts,
-        slots,
-        markets,
-        obs,
-        accountId: id,
-        pnl,
-        positions,
-        fills,
-        features,
-        selected: config.enabledSlots,
-      });
-      if (!dirtyRef.current) setSelection(config.enabledSlots);
-      setUpdated(Date.now());
-      setError("");
-    } catch (e) {
-      if (seq === request.current) {
-        const message = (e as Error).message;
-        setError(message);
-        if (message === "unauthorized") setAuth(false);
+  const refresh = useCallback(
+    async (preferredId?: string) => {
+      const seq = ++request.current;
+      try {
+        const [accounts, slots, markets, obs, automation] = await Promise.all([
+          api<Account[]>("accounts"),
+          api<Slot[]>("strategies"),
+          api<Market[]>("markets"),
+          api<Observation>("observability"),
+          api<MarketAutomation>("markets/automation"),
+        ]);
+        const savedAccountId =
+            window.localStorage.getItem("predict_account_id"),
+          id =
+            preferredId ||
+            accountId ||
+            accounts.find((candidate) => candidate.id === savedAccountId)?.id ||
+            accounts[0]?.id ||
+            "";
+        const [pnl, positions, fills, features, config] = id
+          ? await Promise.all([
+              api<Pnl>(`accounts/${id}/pnl`),
+              api<Row[]>(`accounts/${id}/positions`),
+              api<Row[]>(`accounts/${id}/fills?limit=50`),
+              api<unknown[]>(`accounts/${id}/features`),
+              api<{ enabledSlots: string[]; revision: number }>(
+                `accounts/${id}/strategies`,
+              ),
+            ])
+          : [null, [], [], [], { enabledSlots: [], revision: 0 }];
+        if (seq !== request.current) return;
+        setSnapshot({
+          accounts,
+          slots,
+          markets,
+          automation,
+          obs,
+          accountId: id,
+          pnl,
+          positions,
+          fills,
+          features,
+          selected: config.enabledSlots,
+          configRevision: config.revision,
+        });
+        if (!dirtyRef.current) setSelection(config.enabledSlots);
+        setUpdated(Date.now());
+        setError("");
+      } catch (e) {
+        if (seq === request.current) {
+          const message = (e as Error).message;
+          setError(message);
+          if (message === "unauthorized") setAuth(false);
+        }
       }
-    }
-  }, [accountId]);
+    },
+    [accountId],
+  );
   useEffect(() => {
     if (!auth) return;
     void refresh();
@@ -254,6 +313,30 @@ export default function Dashboard() {
       await api(path, method, body);
       setNotice("saved");
       await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function createPaperAccount(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setBusy(true);
+    setNotice("");
+    setError("");
+    try {
+      const form = new FormData(e.currentTarget),
+        created = await api<Account>("accounts", "POST", {
+          name: form.get("name"),
+          initialEquity: Number(form.get("equity")),
+        });
+      activeId.current = created.id;
+      setAccountId(created.id);
+      window.localStorage.setItem("predict_account_id", created.id);
+      dirtyRef.current = false;
+      setDirty(false);
+      setNotice("saved");
+      await refresh(created.id);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -285,6 +368,7 @@ export default function Dashboard() {
   const current =
     snapshot?.accountId === (accountId || snapshot?.accounts[0]?.id || "");
   const disabled = busy || stale || !current;
+  const accountControlDisabled = busy || !current;
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -321,7 +405,12 @@ export default function Dashboard() {
         </nav>
         <div className="side-bottom">
           <span className="badge">PAPER TRADING</span>
-          <p>{tx("模拟执行 · 实盘未开放", "Simulation only · Live trading disabled")}</p>
+          <p>
+            {tx(
+              "模拟执行 · 实盘未开放",
+              "Simulation only · Live trading disabled",
+            )}
+          </p>
           <small>Predict.fun / BNB Chain</small>
         </div>
       </aside>
@@ -352,6 +441,10 @@ export default function Dashboard() {
               <button
                 className="text-button"
                 onClick={async () => {
+                  if (authMode === "authjs") {
+                    window.location.href = "/api/auth/signout";
+                    return;
+                  }
                   const r = await fetch("/api/session", { method: "DELETE" });
                   if (r.ok) {
                     request.current++;
@@ -386,7 +479,7 @@ export default function Dashboard() {
                 </button>
                 <button
                   className="danger"
-                  disabled={disabled}
+                  disabled={busy}
                   onClick={() => {
                     if (
                       confirm(
@@ -417,40 +510,66 @@ export default function Dashboard() {
           {notice && (
             <div className="alert" role="status">
               {notice === "saved"
-                ? tx("已保存，变更已提交到 Worker。", "Saved. Changes were submitted to the Worker.")
+                ? tx(
+                    "已保存，变更已提交到 Worker。",
+                    "Saved. Changes were submitted to the Worker.",
+                  )
                 : notice === "strategy_saved"
-                  ? tx("策略已保存；仅影响新意图。", "Strategies saved; only new intents are affected.")
+                  ? tx(
+                      "策略已保存；仅影响新意图。",
+                      "Strategies saved; only new intents are affected.",
+                    )
                   : notice}
             </div>
           )}
           {auth === null ? (
-            <div className="empty">{tx("正在检查会话…", "Checking session…")}</div>
+            <div className="empty">
+              {tx("正在检查会话…", "Checking session…")}
+            </div>
           ) : !auth ? (
             <section className="login panel">
               <div className="eyebrow">SECURE ACCESS</div>
-              <h2>{tx("连接你的交易工作台", "Connect to your trading workspace")}</h2>
+              <h2>
+                {tx("连接你的交易工作台", "Connect to your trading workspace")}
+              </h2>
               <p>
                 {tx(
-                  "使用独立控制台访问密钥登录。交易所密钥仅保存在服务端。",
-                  "Sign in with the dedicated dashboard access key. Exchange credentials remain server-side.",
+                  authMode === "authjs"
+                    ? "使用已分配到交易工作区的账户登录。交易凭证仅保存在服务端。"
+                    : "使用独立控制台访问密钥登录。交易所密钥仅保存在服务端。",
+                  authMode === "authjs"
+                    ? "Sign in with an account assigned to a trading workspace. Trading credentials remain server-side."
+                    : "Sign in with the dedicated dashboard access key. Exchange credentials remain server-side.",
                 )}
               </p>
-              <form onSubmit={signIn}>
-                <label>
-                  {tx("控制台访问密钥", "Dashboard access key")}
-                  <input
-                    type="password"
-                    autoComplete="current-password"
-                    value={key}
-                    onChange={(e) => setKey(e.target.value)}
-                    required
-                    minLength={32}
-                  />
-                </label>
-                <button className="primary" disabled={busy || !configured}>
-                  {tx("进入控制台 →", "Enter control room →")}
+              {authMode === "authjs" ? (
+                <button
+                  className="primary"
+                  disabled={!configured}
+                  onClick={() => {
+                    window.location.href = "/api/auth/signin";
+                  }}
+                >
+                  {tx("使用账户登录 →", "Sign in with account →")}
                 </button>
-              </form>
+              ) : (
+                <form onSubmit={signIn}>
+                  <label>
+                    {tx("控制台访问密钥", "Dashboard access key")}
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={key}
+                      onChange={(e) => setKey(e.target.value)}
+                      required
+                      minLength={32}
+                    />
+                  </label>
+                  <button className="primary" disabled={busy || !configured}>
+                    {tx("进入控制台 →", "Enter control room →")}
+                  </button>
+                </form>
+              )}
               {!configured && (
                 <div className="alert">
                   {tx(
@@ -460,7 +579,10 @@ export default function Dashboard() {
                 </div>
               )}
               <div className="login-note">
-                {tx("模拟账户 / 风险管理 / 运行监控", "Paper accounts / Risk controls / Operations")}
+                {tx(
+                  "模拟账户 / 风险管理 / 运行监控",
+                  "Paper accounts / Risk controls / Operations",
+                )}
                 <br />
                 {tx(
                   "没有模拟收益展示，所有数据均来自已连接的 Worker。",
@@ -492,9 +614,23 @@ export default function Dashboard() {
                     aria-label={tx("选择账户", "Select account")}
                     value={accountId || snapshot?.accountId || ""}
                     onChange={(e) => {
+                      if (
+                        dirtyRef.current &&
+                        !confirm(
+                          tx(
+                            "放弃尚未保存的策略变更并切换账户？",
+                            "Discard unsaved strategy changes and switch accounts?",
+                          ),
+                        )
+                      )
+                        return;
                       request.current++;
                       activeId.current = e.target.value;
                       setAccountId(e.target.value);
+                      window.localStorage.setItem(
+                        "predict_account_id",
+                        e.target.value,
+                      );
                       dirtyRef.current = false;
                       setDirty(false);
                       setNotice("");
@@ -513,17 +649,25 @@ export default function Dashboard() {
                 {account && (
                   <>
                     <span
-                      className={`badge ${account.enabled ? "positive" : "muted"}`}
+                      className={`badge ${account.enabled && snapshot?.obs.readiness === "ready" ? "positive" : "muted"}`}
                     >
                       {account.enabled
-                        ? tx("运行中", "Running")
+                        ? snapshot?.obs.readiness === "ready"
+                          ? tx("运行中", "Running")
+                          : tx(
+                              "已启用 · 当前受阻",
+                              "Enabled · currently blocked",
+                            )
                         : tx("已暂停", "Paused")}
                     </span>
                     <button
-                      disabled={disabled}
+                      disabled={
+                        account.enabled ? accountControlDisabled : disabled
+                      }
                       onClick={() =>
                         void mutate(`accounts/${account.id}`, "PATCH", {
                           enabled: !account.enabled,
+                          expectedRevision: account.revision ?? 0,
                         })
                       }
                     >
@@ -533,14 +677,22 @@ export default function Dashboard() {
                     </button>
                     <small className="mono">
                       {account.walletAddress ||
-                        tx("未关联钱包 · 模拟资金", "No wallet linked · Paper funds")}
+                        tx(
+                          "未关联钱包 · 模拟资金",
+                          "No wallet linked · Paper funds",
+                        )}
                     </small>
                   </>
                 )}
               </div>
               {!snapshot ? (
                 <div className="panel empty">
-                  <h2>{tx("等待真实运行数据", "Waiting for live operational data")}</h2>
+                  <h2>
+                    {tx(
+                      "等待真实运行数据",
+                      "Waiting for live operational data",
+                    )}
+                  </h2>
                   <p>
                     {tx(
                       "连接持久化 Worker 后，账户、策略、市场和运行指标将在此显示。",
@@ -563,12 +715,18 @@ export default function Dashboard() {
                           [
                             tx("已实现盈亏", "Realized P&L"),
                             snapshot.pnl?.realizedPnl,
-                            tx("结算后净收益，已扣费用", "Net settled return after fees"),
+                            tx(
+                              "结算后净收益，已扣费用",
+                              "Net settled return after fees",
+                            ),
                           ],
                           [
                             tx("可用资金", "Available funds"),
                             snapshot.pnl?.cash,
-                            tx("USDT · 模拟账户现金", "USDT · Paper account cash"),
+                            tx(
+                              "USDT · 模拟账户现金",
+                              "USDT · Paper account cash",
+                            ),
                           ],
                           [
                             tx("持仓占用", "Committed capital"),
@@ -604,7 +762,9 @@ export default function Dashboard() {
                         <section className="panel">
                           <div className="panel-title">
                             <h2>{tx("执行概况", "Execution overview")}</h2>
-                            <span className="badge">{tx("实时状态", "LIVE STATUS")}</span>
+                            <span className="badge">
+                              {tx("实时状态", "LIVE STATUS")}
+                            </span>
                           </div>
                           <div className="metric-row">
                             <span>{tx("活跃市场", "Active markets")}</span>
@@ -621,7 +781,9 @@ export default function Dashboard() {
                             </strong>
                           </div>
                           <div className="metric-row">
-                            <span>{tx("已启用策略槽位", "Enabled strategy slots")}</span>
+                            <span>
+                              {tx("已启用策略槽位", "Enabled strategy slots")}
+                            </span>
                             <strong>
                               {snapshot.selected.length} /{" "}
                               {snapshot.slots.length}
@@ -658,7 +820,11 @@ export default function Dashboard() {
                             ))
                           ) : (
                             <div className="check">
-                              ✓ {tx("引擎和市场数据检查通过", "Engine and market-data checks passed")}
+                              ✓{" "}
+                              {tx(
+                                "引擎和市场数据检查通过",
+                                "Engine and market-data checks passed",
+                              )}
                             </div>
                           )}
                           <p className="footnote">
@@ -673,14 +839,7 @@ export default function Dashboard() {
                         <h2>{tx("新建模拟账户", "Create paper account")}</h2>
                         <form
                           className="inline-form"
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            const f = new FormData(e.currentTarget);
-                            void mutate("accounts", "POST", {
-                              name: f.get("name"),
-                              initialEquity: Number(f.get("equity")),
-                            });
-                          }}
+                          onSubmit={(e) => void createPaperAccount(e)}
                         >
                           <label>
                             {tx("账户名称", "Account name")}
@@ -688,7 +847,10 @@ export default function Dashboard() {
                               name="name"
                               required
                               maxLength={80}
-                              placeholder={tx("例如：BTC 趋势策略", "Example: BTC trend strategy")}
+                              placeholder={tx(
+                                "例如：BTC 趋势策略",
+                                "Example: BTC trend strategy",
+                              )}
                             />
                           </label>
                           <label>
@@ -708,7 +870,10 @@ export default function Dashboard() {
                         </form>
                       </section>
                       {account && (
-                        <section className="panel" key={account.id}>
+                        <section
+                          className="panel"
+                          key={`${account.id}:${account.revision ?? 0}`}
+                        >
                           <h2>{tx("风险参数", "Risk parameters")}</h2>
                           <form
                             className="inline-form"
@@ -720,6 +885,7 @@ export default function Dashboard() {
                                 maxTotalRisk: Number(f.get("total")) / 100,
                                 dailyLossLimit: Number(f.get("daily")) / 100,
                                 fixedShares: Number(f.get("shares")),
+                                expectedRevision: account.revision ?? 0,
                               });
                             }}
                           >
@@ -743,7 +909,10 @@ export default function Dashboard() {
                                 5,
                               ],
                               [
-                                tx("每市场目标份额", "Target shares per market"),
+                                tx(
+                                  "每市场目标份额",
+                                  "Target shares per market",
+                                ),
                                 "shares",
                                 account.fixedShares,
                                 10000,
@@ -766,6 +935,15 @@ export default function Dashboard() {
                               {tx("保存风险参数", "Save risk parameters")}
                             </button>
                           </form>
+                          {account.initialEquity * account.maxMarketRisk <
+                            1.02 && (
+                            <p className="footnote warning">
+                              {tx(
+                                "当前单市场风险预算低于模拟撮合的最低 1 USDT 名义金额加费用；账户不会成交。",
+                                "The per-market risk budget is below the paper minimum of 1 USDT notional plus fees; this account cannot fill.",
+                              )}
+                            </p>
+                          )}
                         </section>
                       )}
                     </>
@@ -792,7 +970,10 @@ export default function Dashboard() {
                               await api(
                                 `accounts/${account.id}/strategies`,
                                 "PUT",
-                                { enabledSlots: selection },
+                                {
+                                  enabledSlots: selection,
+                                  expectedRevision: snapshot.configRevision,
+                                },
                               );
                               dirtyRef.current = false;
                               setDirty(false);
@@ -859,7 +1040,10 @@ export default function Dashboard() {
                                       className="warning"
                                       title={s.blockedReason}
                                     >
-                                      {tx("源定义缺失", "Source definition missing")}
+                                      {tx(
+                                        "源定义缺失",
+                                        "Source definition missing",
+                                      )}
                                     </span>
                                   ) : (
                                     <span className="badge positive">
@@ -873,7 +1057,9 @@ export default function Dashboard() {
                         </table>
                       </div>
                       <details>
-                        <summary>{tx("最近特征与信号", "Recent features and signals")}</summary>
+                        <summary>
+                          {tx("最近特征与信号", "Recent features and signals")}
+                        </summary>
                         <pre>{JSON.stringify(snapshot.features, null, 2)}</pre>
                       </details>
                     </section>
@@ -882,15 +1068,54 @@ export default function Dashboard() {
                     <section className="panel">
                       <div className="panel-title">
                         <h2>{tx("已审核市场", "Approved markets")}</h2>
-                        <span>
-                          {snapshot.markets.length} {tx("个市场", "markets")}
+                        <span
+                          className={`badge ${snapshot.automation.enabled ? "positive" : "muted"}`}
+                        >
+                          {snapshot.automation.enabled
+                            ? tx(
+                                "自动注册已开启",
+                                "Automatic registration enabled",
+                              )
+                            : tx("手动注册模式", "Manual registration mode")}
                         </span>
                       </div>
+                      {snapshot.automation.enabled && (
+                        <div className="stats compact-stats">
+                          {[
+                            [
+                              tx("发现", "Discovered"),
+                              snapshot.automation.discovered,
+                            ],
+                            [
+                              tx("符合策略", "Eligible"),
+                              snapshot.automation.eligible,
+                            ],
+                            [
+                              tx("本轮注册", "Registered"),
+                              snapshot.automation.registered,
+                            ],
+                            [
+                              tx("拒绝", "Rejected"),
+                              snapshot.automation.rejected,
+                            ],
+                          ].map(([name, value]) => (
+                            <div className="metric-row" key={String(name)}>
+                              <span>{name}</span>
+                              <strong>{value}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <p className="footnote">
-                        {tx(
-                          "市场需通过 Worker API 审核注册；自动发现结果不会直接参与交易。订单簿超过 1 秒视为过期。",
-                          "Markets must be reviewed and registered through the Worker API. Discovery results never trade automatically. Order books older than one second are stale.",
-                        )}
+                        {snapshot.automation.enabled
+                          ? tx(
+                              `仅自动注册策略允许的 ${snapshot.automation.symbols.join("/")}、${snapshot.automation.durations.map((duration) => `${duration / 60}m`).join("/")} 市场；规则或结算证据含糊时自动关闭并等待人工处理。`,
+                              `Only policy-approved ${snapshot.automation.symbols.join("/")} ${snapshot.automation.durations.map((duration) => `${duration / 60}m`).join("/")} markets are registered. Ambiguous rules or settlement evidence fail closed for manual review.`,
+                            )
+                          : tx(
+                              "市场继续通过 Worker API 人工审核注册；订单簿超过 1 秒视为过期。",
+                              "Markets continue to use manual Worker API registration. Order books older than one second are stale.",
+                            )}
                       </p>
                       {!snapshot.markets.length ? (
                         <div className="empty">
@@ -907,6 +1132,7 @@ export default function Dashboard() {
                                 <th>{tx("市场", "Market")}</th>
                                 <th>{tx("周期", "Interval")}</th>
                                 <th>{tx("状态", "Status")}</th>
+                                <th>{tx("注册来源", "Registration")}</th>
                                 <th>{tx("结束时间", "End time")}</th>
                                 <th>{tx("盘口时效", "Book age")}</th>
                                 <th>{tx("盘口", "Order book")}</th>
@@ -928,9 +1154,19 @@ export default function Dashboard() {
                                     </td>
                                     <td>{m.duration / 60}m</td>
                                     <td>
-                                      {m.status === "OPEN" && now >= m.end
-                                        ? "EXPIRED"
-                                        : m.status}
+                                      {m.blockedReason
+                                        ? `BLOCKED · ${m.blockedReason}`
+                                        : m.status === "OPEN" && now >= m.end
+                                          ? "EXPIRED"
+                                          : m.status}
+                                    </td>
+                                    <td>
+                                      {m.source === "predict-auto-v1"
+                                        ? tx(
+                                            "Predict 自动",
+                                            "Predict automatic",
+                                          )
+                                        : tx("人工", "Manual")}
                                     </td>
                                     <td>{time(m.end, locale)}</td>
                                     <td
@@ -972,7 +1208,8 @@ export default function Dashboard() {
                       {book && (
                         <details open>
                           <summary>
-                            {tx("YES 方向盘口", "YES-side order book")} · {book.id}
+                            {tx("YES 方向盘口", "YES-side order book")} ·{" "}
+                            {book.id}
                             {tx("（手动快照）", " (manual snapshot)")}
                           </summary>
                           <pre>{JSON.stringify(book.data, null, 2)}</pre>
@@ -1024,7 +1261,9 @@ export default function Dashboard() {
                     <>
                       <div className="stats">
                         <section className="panel stat">
-                          <div>{tx("引擎单轮耗时", "Engine tick duration")}</div>
+                          <div>
+                            {tx("引擎单轮耗时", "Engine tick duration")}
+                          </div>
                           <strong>
                             {snapshot.obs.runtime?.lastTickMs?.toFixed(2) ??
                               "—"}
@@ -1062,7 +1301,9 @@ export default function Dashboard() {
                           snapshot.obs.events.map((e) => (
                             <details key={e.seq} className="event">
                               <summary>
-                                <span className="mono">{time(e.time, locale)}</span>
+                                <span className="mono">
+                                  {time(e.time, locale)}
+                                </span>
                                 <span>{e.type}</span>
                                 <small>#{e.seq}</small>
                               </summary>
@@ -1070,7 +1311,9 @@ export default function Dashboard() {
                             </details>
                           ))
                         ) : (
-                          <div className="empty">{tx("暂无事件", "No events")}</div>
+                          <div className="empty">
+                            {tx("暂无事件", "No events")}
+                          </div>
                         )}
                       </section>
                       <section className="panel">
@@ -1131,9 +1374,7 @@ function DataTable({
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c}>
-                {names[c]?.[locale] ?? c}
-              </th>
+              <th key={c}>{names[c]?.[locale] ?? c}</th>
             ))}
           </tr>
         </thead>
