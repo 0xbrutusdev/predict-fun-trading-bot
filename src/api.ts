@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { z } from "zod";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Store } from "./store.js";
 import { slots, blocked } from "./strategies.js";
 import { settle, type Account } from "./execution.js";
@@ -34,6 +34,7 @@ const riskBody = z
     dailyLossLimit: finite.min(0.0001).max(0.05).optional(),
     fixedShares: finite.min(1).max(10000).optional(),
     depthFraction: finite.min(0.001).max(0.1).optional(),
+    expectedRevision: finite.int().nonnegative().optional(),
   })
   .strict();
 const marketBody = z
@@ -81,13 +82,28 @@ export async function createApp(
     origin,
     methods: ["GET", "POST", "PUT", "PATCH"],
   });
-  await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   const equal = (x: string, y: string) =>
     Buffer.byteLength(x) === Buffer.byteLength(y) &&
     timingSafeEqual(Buffer.from(x), Buffer.from(y));
+  const credential = (authorization?: string) =>
+    (authorization || "").replace(/^Bearer /, "");
+  const knownCredential = (authorization?: string) => {
+    const value = credential(authorization);
+    return equal(value, token) || Boolean(readToken && equal(value, readToken));
+  };
+  await app.register(rateLimit, {
+    max: (req) => (knownCredential(req.headers.authorization) ? 3000 : 120),
+    timeWindow: "1 minute",
+    keyGenerator: (req) => {
+      const value = credential(req.headers.authorization);
+      return knownCredential(req.headers.authorization)
+        ? createHash("sha256").update(value).digest("hex")
+        : req.ip;
+    },
+  });
   app.addHook("onRequest", async (req, reply) => {
     if (req.url === "/health" || req.method === "OPTIONS") return;
-    const value = (req.headers.authorization || "").replace(/^Bearer /, "");
+    const value = credential(req.headers.authorization);
     const admin = equal(value, token),
       read = readToken && equal(value, readToken);
     if (!admin && !read)
@@ -109,8 +125,8 @@ export async function createApp(
   const fail = (code: string, statusCode = 404) => {
     throw Object.assign(Error(code), { statusCode });
   };
-  const account = (req: any) =>
-    store.get<Account>("account", id.parse(req.params.id)) ??
+  const account = async (req: any) =>
+    (await store.get<Account>("account", id.parse(req.params.id))) ??
     fail("account_not_found");
   const page = (req: any) =>
     z
@@ -201,7 +217,7 @@ export async function createApp(
     "GET",
     "/v1/observability",
     "Worker readiness, freshness and recent operational events",
-    () => ({ data: observability(store, runtime) }),
+    async () => ({ data: await observability(store, runtime) }),
   );
   route("GET", "/v1/openapi.json", "OpenAPI contract", () => spec);
   route("GET", "/v1/status", "Bot capabilities and release gates", () => ({
@@ -213,7 +229,7 @@ export async function createApp(
         "fee_contract_unverified",
         "out_of_sample_validation_required",
       ],
-      storage: "sqlite-single-writer",
+      storage: "mongodb",
       time: Date.now(),
     },
   }));
@@ -246,51 +262,93 @@ export async function createApp(
         dailyLossLimit: 0.01,
         depthFraction: 0.1,
         createdAt: Date.now(),
+        revision: 1,
       };
-      store.transaction(() => {
-        store.put("account", a.id, a);
-        store.event("account.created", { accountId: a.id });
+      await store.transaction(async () => {
+        await store.put("account", a.id, a);
+        await store.put("config", a.id, {
+          enabledSlots: slots
+            .filter((slot) => !blocked[slot.strategy])
+            .map((slot) => slot.id),
+          revision: 1,
+        });
+        await store.event("account.created", { accountId: a.id });
       });
       return { data: a };
     },
     accountBody,
   );
-  route("GET", "/v1/accounts", "List accounts", () => ({
-    data: store.list<Account>("account"),
+  route("GET", "/v1/accounts", "List accounts", async () => ({
+    data: await store.list<Account>("account"),
   }));
   route(
     "GET",
     "/v1/accounts/:id",
     "Account settings and available paper cash",
-    (req: any) => ({ data: account(req) }),
+    async (req: any) => ({ data: await account(req) }),
   );
   route(
     "PATCH",
     "/v1/accounts/:id",
     "Configure paper engine and risk limits",
-    (req: any) => {
-      const a = account(req),
-        next = { ...a, ...riskBody.parse(req.body) };
+    async (req: any) => {
+      const a = await account(req),
+        { expectedRevision, ...changes } = riskBody.parse(req.body),
+        revision = a.revision ?? 0;
+      if (expectedRevision !== undefined && expectedRevision !== revision)
+        fail("revision_conflict", 409);
+      if (
+        changes.enabled === true &&
+        (await store.hasUnknownSettlementTime(a.id))
+      )
+        fail("historical_settlement_time_unknown", 409);
+      const next = { ...a, ...changes, revision: revision + 1 };
       if (next.maxMarketRisk > next.maxTotalRisk)
         fail("market_risk_exceeds_total", 400);
-      store.transaction(() => {
-        store.put("account", a.id, next);
-        store.event("account.updated", { accountId: a.id, changes: req.body });
+      await store.transaction(async () => {
+        await store.put("account", a.id, next);
+        await store.event("account.updated", {
+          accountId: a.id,
+          revision: next.revision,
+          changes,
+        });
       });
       return { data: next };
     },
     riskBody,
   );
   const selection = z
-    .object({ enabledSlots: z.array(z.string()).max(20) })
+    .object({
+      enabledSlots: z.array(z.string()).max(20),
+      expectedRevision: finite.int().nonnegative().optional(),
+    })
     .strict();
+  type StrategyConfig = { enabledSlots: string[]; revision: number };
+  const strategyConfig = async (accountId: string): Promise<StrategyConfig> => {
+    const current = await store.get<StrategyConfig>("config", accountId);
+    if (current) return { ...current, revision: current.revision ?? 0 };
+    const materialized = {
+      enabledSlots: slots
+        .filter((slot) => !blocked[slot.strategy])
+        .map((slot) => slot.id),
+      revision: 1,
+    };
+    await store.put("config", accountId, materialized);
+    return materialized;
+  };
   route(
     "PUT",
     "/v1/accounts/:id/strategies",
     "Select enabled strategy slots",
-    (req: any) => {
-      const a = account(req),
-        b = selection.parse(req.body);
+    async (req: any) => {
+      const a = await account(req),
+        b = selection.parse(req.body),
+        current = await strategyConfig(a.id);
+      if (
+        b.expectedRevision !== undefined &&
+        b.expectedRevision !== current.revision
+      )
+        fail("revision_conflict", 409);
       if (b.enabledSlots.some((s) => !slots.some((x) => x.id === s)))
         fail("unknown_slot", 400);
       if (
@@ -301,9 +359,13 @@ export async function createApp(
         fail("source_feature_undefined", 409);
       if (new Set(b.enabledSlots).size !== b.enabledSlots.length)
         fail("duplicate_slot", 400);
-      store.put("config", a.id, b);
-      store.event("strategy.updated", { accountId: a.id, ...b });
-      return { data: b };
+      const next = {
+        enabledSlots: b.enabledSlots,
+        revision: current.revision + 1,
+      };
+      await store.put("config", a.id, next);
+      await store.event("strategy.updated", { accountId: a.id, ...next });
+      return { data: next };
     },
     selection,
   );
@@ -311,14 +373,10 @@ export async function createApp(
     "GET",
     "/v1/accounts/:id/strategies",
     "Read account slot selection",
-    (req: any) => {
-      const a = account(req);
+    async (req: any) => {
+      const a = await account(req);
       return {
-        data: store.get("config", a.id) ?? {
-          enabledSlots: slots
-            .filter((s) => !blocked[s.strategy])
-            .map((s) => s.id),
-        },
+        data: await strategyConfig(a.id),
       };
     },
   );
@@ -326,13 +384,13 @@ export async function createApp(
     "GET",
     "/v1/accounts/:id/features",
     "Latest causal features and qualifying signals",
-    (req: any) => {
-      const a = account(req);
+    async (req: any) => {
+      const a = await account(req);
       return {
-        data: store
-          .list<any>("features")
+        data: (await store.list<any>("features"))
           .filter((x) => x.accountId === a.id)
-          .slice(-50),
+          .sort((x, y) => Number(y.time ?? 0) - Number(x.time ?? 0))
+          .slice(0, 50),
       };
     },
   );
@@ -340,13 +398,9 @@ export async function createApp(
     "GET",
     "/v1/accounts/:id/positions",
     "Open positions and committed capital",
-    (req: any) => {
-      const a = account(req);
-      const rows = store.db
-        .prepare(
-          "SELECT market,direction,SUM(quantity) quantity,SUM(cost) cost,SUM(fee) fees FROM fills WHERE account=? AND payout IS NULL GROUP BY market,direction",
-        )
-        .all(a.id) as any[];
+    async (req: any) => {
+      const a = await account(req);
+      const rows = await store.positions(a.id);
       return {
         data: rows.map((x) => ({
           ...x,
@@ -360,14 +414,10 @@ export async function createApp(
     "GET",
     "/v1/accounts/:id/fills",
     "Paginated execution and settlement ledger",
-    (req: any) => {
-      const a = account(req),
+    async (req: any) => {
+      const a = await account(req),
         p = page(req);
-      const rows = store.db
-        .prepare(
-          "SELECT rowid cursor,* FROM fills WHERE account=? AND rowid>? ORDER BY rowid LIMIT ?",
-        )
-        .all(a.id, p.after, p.limit) as any[];
+      const rows = await store.fillsPage(a.id, p.after, p.limit);
       return {
         data: rows.map((x) => ({
           ...x,
@@ -384,13 +434,9 @@ export async function createApp(
     "GET",
     "/v1/accounts/:id/pnl",
     "Realized PnL and conservative open-risk valuation",
-    (req: any) => {
-      const a = account(req),
-        r = store.db
-          .prepare(
-            "SELECT COALESCE(SUM(pnl),0) pnl,COALESCE(SUM(fee),0) fees,COALESCE(SUM(CASE WHEN payout IS NULL THEN cost+fee ELSE 0 END),0) committed,COUNT(*) fills FROM fills WHERE account=?",
-          )
-          .get(a.id) as any;
+    async (req: any) => {
+      const a = await account(req),
+        r = await store.pnlSummary(a.id);
       return {
         data: {
           realizedPnl: money(r.pnl),
@@ -407,27 +453,56 @@ export async function createApp(
       };
     },
   );
-  route("GET", "/v1/markets", "Registered markets and book freshness", () => ({
-    data: store.list<Market>("market").map((m) => {
-      const b = store.get<any[]>("books", m.id)?.at(-1);
-      return { ...m, bookAgeMs: b ? Date.now() - b.receivedAt : null };
-    }),
-  }));
+  route(
+    "GET",
+    "/v1/markets",
+    "Registered markets and book freshness",
+    async () => {
+      const data = [];
+      for (const market of await store.list<Market>("market")) {
+        const book = (await store.get<any[]>("books", market.id))?.at(-1);
+        data.push({
+          ...market,
+          bookAgeMs: book ? Date.now() - book.receivedAt : null,
+        });
+      }
+      return { data };
+    },
+  );
   route(
     "GET",
     "/v1/markets/discovery",
     "Unapproved venue market metadata",
-    () => ({ data: store.get("discovery", "latest") ?? null }),
+    async () => ({ data: (await store.get("discovery", "latest")) ?? null }),
+  );
+  route(
+    "GET",
+    "/v1/markets/automation",
+    "Automatic Predict market registration and settlement status",
+    async () => ({
+      data: (await store.get("automation", "market")) ?? {
+        enabled: false,
+        symbols: [],
+        durations: [],
+        providers: [],
+        lastRefreshAt: null,
+        discovered: 0,
+        eligible: 0,
+        registered: 0,
+        rejected: 0,
+      },
+    }),
   );
   route(
     "POST",
     "/v1/markets",
     "Register verified paper market metadata",
-    (req: any) => {
+    async (req: any) => {
       const m = marketBody.parse(req.body);
-      if (store.get("market", m.id)) fail("market_already_registered", 409);
-      store.put("market", m.id, m);
-      store.event("market.registered", m);
+      if (await store.get("market", m.id))
+        fail("market_already_registered", 409);
+      await store.put("market", m.id, m);
+      await store.event("market.registered", m);
       return { data: m };
     },
     marketBody,
@@ -436,8 +511,10 @@ export async function createApp(
     "GET",
     "/v1/markets/:id/book",
     "Latest normalized YES-oriented order book",
-    (req: any) => ({
-      data: store.get<any[]>("books", id.parse(req.params.id))?.at(-1) ?? null,
+    async (req: any) => ({
+      data:
+        (await store.get<any[]>("books", id.parse(req.params.id)))?.at(-1) ??
+        null,
     }),
   );
   const resolution = z
@@ -450,33 +527,29 @@ export async function createApp(
     "POST",
     "/v1/markets/:id/resolution",
     "Record authoritative paper settlement",
-    (req: any) => {
+    async (req: any) => {
       const m =
-          store.get<Market>("market", id.parse(req.params.id)) ??
+          (await store.get<Market>("market", id.parse(req.params.id))) ??
           fail("market_not_found"),
         b = resolution.parse(req.body);
       if (Date.now() < m.end || Math.abs(b.payout[0] + b.payout[1] - 1) > 1e-9)
         fail("invalid_resolution", 400);
       if (m.payout && JSON.stringify(m.payout) !== JSON.stringify(b.payout))
         fail("resolution_conflict", 409);
-      settle(store, { ...m, status: "RESOLVED", payout: b.payout });
-      store.event("resolution.evidence", { marketId: m.id, source: b.source });
+      await settle(store, { ...m, status: "RESOLVED", payout: b.payout });
+      await store.event("resolution.evidence", {
+        marketId: m.id,
+        source: b.source,
+      });
       return { data: { ...m, status: "RESOLVED", payout: b.payout } };
     },
     resolution,
   );
-  route("GET", "/v1/events", "Cursor-based event polling", (req: any) => {
+  route("GET", "/v1/events", "Cursor-based event polling", async (req: any) => {
     const p = page(req),
-      rows = store.db
-        .prepare("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?")
-        .all(p.after, p.limit) as any[];
+      rows = await store.eventsPage(p.after, p.limit);
     return {
-      data: rows.map((x) => ({
-        seq: x.seq,
-        time: x.time,
-        type: x.type,
-        data: JSON.parse(x.json),
-      })),
+      data: rows,
       meta: { nextCursor: rows.at(-1)?.seq ?? p.after },
     };
   });
@@ -484,11 +557,11 @@ export async function createApp(
     "POST",
     "/v1/kill-switch",
     "Pause all accounts without changing holdings",
-    () => {
-      store.transaction(() => {
-        for (const a of store.list<Account>("account"))
-          store.put("account", a.id, { ...a, enabled: false });
-        store.event("risk.kill_switch", {});
+    async () => {
+      await store.transaction(async () => {
+        for (const a of await store.list<Account>("account"))
+          await store.put("account", a.id, { ...a, enabled: false });
+        await store.event("risk.kill_switch", {});
       });
       return { data: { paused: true } };
     },
@@ -504,9 +577,11 @@ export async function createApp(
     dailyLossLimit: finite,
     depthFraction: finite,
     createdAt: finite,
+    revision: finite.int().nonnegative().optional(),
   });
   const slotSchema = z.object({
     id: z.string(),
+    key: z.string(),
     symbol: z.string(),
     duration: finite,
     strategy: z.string(),
@@ -548,8 +623,14 @@ export async function createApp(
     "get /v1/strategies": z.array(slotSchema),
     "get /v1/accounts/{id}/pnl": pnlSchema,
     "get /v1/accounts/{id}/fills": z.array(fillSchema),
-    "get /v1/accounts/{id}/strategies": selection,
-    "put /v1/accounts/{id}/strategies": selection,
+    "get /v1/accounts/{id}/strategies": z.object({
+      enabledSlots: z.array(z.string()),
+      revision: finite.int().nonnegative(),
+    }),
+    "put /v1/accounts/{id}/strategies": z.object({
+      enabledSlots: z.array(z.string()),
+      revision: finite.int().nonnegative(),
+    }),
     "get /v1/accounts/{id}/positions": z.array(
       z.object({
         market: z.string(),

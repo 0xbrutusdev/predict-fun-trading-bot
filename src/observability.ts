@@ -7,24 +7,27 @@ export type RuntimeStatus = {
   engineErrors: number;
   lastEngineErrorAt: number | null;
   collectorEnabled: boolean;
+  writerLeaseHeld?: boolean;
 };
-export function observability(
+export async function observability(
   store: Store,
   runtime?: RuntimeStatus,
   now = Date.now(),
 ) {
-  const markets = store
-    .list<Market>("market")
-    .filter((m) => m.status === "OPEN" && m.start <= now && m.end > now);
-  const stale = markets.filter((m) => {
-    const b = store.get<Book[]>("books", m.id)?.at(-1);
-    return (
+  const markets = (await store.list<Market>("market")).filter(
+    (m) => m.status === "OPEN" && m.start <= now && m.end > now,
+  );
+  const stale: Market[] = [];
+  for (const m of markets) {
+    const b = (await store.get<Book[]>("books", m.id))?.at(-1);
+    if (
       !b ||
       now - b.receivedAt > 1000 ||
       now - b.updatedAt > 1000 ||
       b.receivedAt > now + 250
-    );
-  });
+    )
+      stale.push(m);
+  }
   const reasons: string[] = [];
   if (
     !runtime ||
@@ -35,26 +38,15 @@ export function observability(
   if (runtime?.lastEngineErrorAt && now - runtime.lastEngineErrorAt < 60000)
     reasons.push("recent_engine_error");
   if (!runtime?.collectorEnabled) reasons.push("collector_disabled");
+  if (runtime?.writerLeaseHeld === false) reasons.push("writer_lease_missing");
   if (!markets.length) reasons.push("no_active_registered_markets");
   if (stale.length) reasons.push("stale_order_books");
-  const rows = store.db
-    .prepare(
-      "SELECT seq,time,type,json FROM events WHERE type NOT IN ('book','candles') ORDER BY seq DESC LIMIT 50",
-    )
-    .all() as { seq: number; time: number; type: string; json: string }[];
-  const latestCollectorError = store.db
-    .prepare(
-      "SELECT time FROM events WHERE type='collector.error' ORDER BY seq DESC LIMIT 1",
-    )
-    .get() as { time: number } | undefined;
-  if (latestCollectorError && now - latestCollectorError.time < 60000)
+  const rows = await store.recentEvents(["book", "candles"], 50);
+  const latestCollectorError = await store.latestEventTime("collector.error");
+  if (latestCollectorError && now - latestCollectorError < 60000)
     reasons.push("recent_collector_error");
-  const candleFeeds = store.db
-    .prepare("SELECT id,json FROM documents WHERE kind='candles'")
-    .all() as { id: string; json: string }[];
-  const feeds = new Map(
-    candleFeeds.map((row) => [row.id, JSON.parse(row.json) as Candle[]]),
-  );
+  const candleFeeds = await store.listEntries<Candle[]>("candles");
+  const feeds = new Map(candleFeeds.map((row) => [row.id, row.value]));
   const missingFeeds = new Set<string>();
   for (const market of markets)
     for (const duration of [60, market.duration, 3600]) {
@@ -78,16 +70,13 @@ export function observability(
     staleBooks: stale.length,
     missingCandleFeeds: [...missingFeeds],
     candleFeeds: candleFeeds.map((row) => {
-      const bars = JSON.parse(row.json) as Candle[];
+      const bars = row.value;
       return {
         id: row.id,
         bars: bars.length,
         latest: bars.at(-1)?.time ?? null,
       };
     }),
-    events: rows.map(({ json, ...row }) => ({
-      ...row,
-      data: JSON.parse(json),
-    })),
+    events: rows,
   };
 }

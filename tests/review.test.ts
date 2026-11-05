@@ -26,7 +26,7 @@ const book: Book = {
   asks: [[0.5, 1000]],
   bids: [[0.49, 1000]],
 };
-function setup() {
+async function setup() {
   const s = new Store(":memory:");
   const a: Account = {
     id: "a",
@@ -43,22 +43,22 @@ function setup() {
     paperFeeBps: 200,
     createdAt: 0,
   };
-  s.put("account", "a", a);
-  s.put("market", m.id, m);
+  await s.put("account", "a", a);
+  await s.put("market", m.id, m);
   return s;
 }
-test("daily risk budget includes unclosed capital", () => {
-  const s = setup();
+test("daily risk budget includes unclosed capital", async () => {
+  const s = await setup();
   assert.equal(
-    paperFill(s, "a", m, book, "up", 15, 0.51, "k", 210000).status,
+    (await paperFill(s, "a", m, book, "up", 15, 0.51, "k", 210000)).status,
     "no_fill",
   );
-  assert.equal(s.get<Account>("account", "a")!.cash, 10000);
-  s.close();
+  assert.equal((await s.get<Account>("account", "a"))!.cash, 10000);
+  await s.close();
 });
-test("reject future books and NaN before changing ledger", () => {
-  const s = setup();
-  assert.throws(() =>
+test("reject future books and NaN before changing ledger", async () => {
+  const s = await setup();
+  await assert.rejects(() =>
     paperFill(
       s,
       "a",
@@ -71,27 +71,29 @@ test("reject future books and NaN before changing ledger", () => {
       210000,
     ),
   );
-  assert.throws(() => paperFill(s, "a", m, book, "up", NaN, 0.51, "k", 210000));
-  assert.throws(() =>
+  await assert.rejects(() =>
+    paperFill(s, "a", m, book, "up", NaN, 0.51, "k", 210000),
+  );
+  await assert.rejects(() =>
     settle(s, { ...m, status: "RESOLVED", payout: [NaN, NaN] }, 300000),
   );
-  s.close();
+  await s.close();
 });
-test("settlement identity and conflict guards apply below HTTP layer", () => {
-  const s = setup();
-  assert.throws(() =>
+test("settlement identity and conflict guards apply below HTTP layer", async () => {
+  const s = await setup();
+  await assert.rejects(() =>
     settle(
       s,
       { ...m, end: 250000, status: "RESOLVED", payout: [1, 0] },
       300000,
     ),
   );
-  settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
-  assert.throws(() =>
+  await settle(s, { ...m, status: "RESOLVED", payout: [0.5, 0.5] }, 300000);
+  await assert.rejects(() =>
     settle(s, { ...m, status: "RESOLVED", payout: [1, 0] }, 300000),
   );
-  assert.deepEqual(s.get<Market>("market", "m")!.payout, [0.5, 0.5]);
-  s.close();
+  assert.deepEqual((await s.get<Market>("market", "m"))!.payout, [0.5, 0.5]);
+  await s.close();
 });
 test("shutdown drains in-flight collector jobs before DB close", async () => {
   const s = new Store(":memory:");
@@ -99,16 +101,54 @@ test("shutdown drains in-flight collector jobs before DB close", async () => {
   let finished = false;
   (c as any).repeat(async () => {
     await new Promise((r) => setTimeout(r, 20));
-    s.event("test", {});
+    await s.event("test", {});
     finished = true;
   }, 1000);
   await c.stop();
   assert.equal(finished, true);
-  s.close();
+  await s.close();
 });
 test("read-only token cannot alias administrative credential", async () => {
   const s = new Store(":memory:");
   await assert.rejects(createApp(s, "a".repeat(32), undefined, "a".repeat(32)));
   await assert.rejects(createApp(s, "a".repeat(32), undefined, "weak"));
-  s.close();
+  await s.close();
+});
+test("repository transactions roll back failed multi-document changes", async () => {
+  const store = new Store(":memory:");
+  await store.put("account", "a", { cash: 100 });
+  await assert.rejects(
+    store.transaction(async () => {
+      await store.put("account", "a", { cash: 0 });
+      await store.event("should.rollback", {});
+      throw Error("rollback");
+    }),
+  );
+  assert.deepEqual(await store.get("account", "a"), { cash: 100 });
+  assert.equal((await store.eventsPage(0, 10)).length, 0);
+  await store.close();
+});
+test("only one process can hold the execution lease for a tenant database", async () => {
+  const store = new Store(":memory:");
+  try {
+    assert.equal(
+      await store.acquireLease("paper-execution", "worker-a", 1000, 5000),
+      true,
+    );
+    assert.equal(
+      await store.acquireLease("paper-execution", "worker-b", 1001, 5000),
+      false,
+    );
+    assert.equal(
+      await store.acquireLease("paper-execution", "worker-b", 6000, 5000),
+      true,
+    );
+    await store.releaseLease("paper-execution", "worker-a");
+    assert.equal(
+      await store.acquireLease("paper-execution", "worker-c", 6001, 5000),
+      false,
+    );
+  } finally {
+    await store.close();
+  }
 });

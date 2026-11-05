@@ -23,6 +23,7 @@ export type Account = {
   depthFraction: number;
   paperFeeBps: number;
   createdAt: number;
+  revision?: number;
 };
 export type Phase = "t1" | "retry" | "t2" | "t3" | "late" | "done";
 export function checkpoint(duration: 300 | 900, phase: Phase) {
@@ -49,7 +50,18 @@ export function decide(
   )
     return {
       buy: false,
-      next: duration === 900 && phase === "t1" ? "t2" : "done",
+      next:
+        duration === 300
+          ? phase === "t1"
+            ? "retry"
+            : phase === "retry"
+              ? "late"
+              : "done"
+          : phase === "t1"
+            ? "t2"
+            : phase === "t2"
+              ? "t3"
+              : "done",
     };
   const p = [...asks].sort((a, b) => a - b)[1];
   if (duration === 300) {
@@ -71,7 +83,7 @@ export function decide(
   if (phase === "t2") return { buy: p >= 0.72 && p < 0.95, next: "t3" };
   return { buy: !priorFill && p >= 0.82 && p < 0.92, next: "done" };
 }
-export function paperFill(
+export async function paperFill(
   store: Store,
   accountId: string,
   m: Market,
@@ -82,7 +94,7 @@ export function paperFill(
   key: string,
   now: number,
 ) {
-  return store.transaction(() => {
+  return store.transaction(async () => {
     if (
       ![target, limit, now, b.receivedAt, b.updatedAt].every(Number.isFinite) ||
       target <= 0 ||
@@ -90,10 +102,12 @@ export function paperFill(
       limit >= 1
     )
       throw Error("invalid_order_input");
-    if (store.get("execution", key))
+    if (await store.get("execution", key))
       return { status: "duplicate", quantity: 0 };
-    const a = store.get<Account>("account", accountId);
+    const a = await store.get<Account>("account", accountId);
     if (!a || !a.enabled) throw Error("account_disabled");
+    if (await store.hasUnknownSettlementTime(accountId))
+      throw Error("historical_settlement_time_unknown");
     if (
       b.marketId !== m.id ||
       m.status !== "OPEN" ||
@@ -105,9 +119,7 @@ export function paperFill(
       now - b.updatedAt > 1000
     )
       throw Error("market_or_book_ineligible");
-    const rows = store.db
-      .prepare("SELECT * FROM fills WHERE account=? AND payout IS NULL")
-      .all(a.id) as any[];
+    const rows = await store.listUnresolvedFills(a.id);
     if (rows.some((x) => x.market === m.id && x.direction !== d))
       throw Error("direction_conflict");
     const total = rows.reduce((s, x) => s + x.cost + x.fee, 0),
@@ -115,15 +127,7 @@ export function paperFill(
         .filter((x) => x.market === m.id)
         .reduce((s, x) => s + x.cost + x.fee, 0);
     const day = Math.floor(now / 86400000) * 86400000;
-    const pnl = Number(
-      (
-        store.db
-          .prepare(
-            "SELECT COALESCE(SUM(pnl),0) pnl FROM fills WHERE account=? AND payout IS NOT NULL AND settled_at>=? AND settled_at<=?",
-          )
-          .get(a.id, day, now) as any
-      ).pnl,
-    );
+    const pnl = await store.sumSettledPnl(a.id, day, now);
     if (pnl <= -units(a.initialEquity * a.dailyLossLimit))
       throw Error("daily_loss_limit");
     const budget = Math.min(
@@ -136,7 +140,8 @@ export function paperFill(
       .filter((x) => x.market === m.id && x.direction === d)
       .reduce((s, x) => s + x.quantity, 0);
     const depthKey = `${m.id}:${d}:${b.updatedAt}`;
-    const consumed = store.get<Record<string, number>>("depth", depthKey) || {};
+    const consumed =
+      (await store.get<Record<string, number>>("depth", depthKey)) || {};
     let left = Math.max(0, target - prior),
       qty = 0,
       cost = 0;
@@ -160,20 +165,25 @@ export function paperFill(
     // Conservative explicit paper fee assumption, not a claim about venue fees.
     const fee = Math.ceil((cost * a.paperFeeBps) / 10000);
     if (cost + fee > budget || cost < units(1) || qty <= 0) {
-      store.put("execution", key, { status: "no_fill", time: now });
+      await store.put("execution", key, { status: "no_fill", time: now });
       return { status: "no_fill", quantity: 0 };
     }
     for (const [price, take] of Object.entries(takes))
       consumed[price] = (consumed[price] || 0) + take;
-    store.put("depth", depthKey, consumed);
+    await store.put("depth", depthKey, consumed);
     const id = randomUUID();
-    store.db
-      .prepare(
-        "INSERT INTO fills(id,account,market,direction,quantity,cost,fee,time) VALUES(?,?,?,?,?,?,?,?)",
-      )
-      .run(id, a.id, m.id, d, qty, cost, fee, now);
+    await store.insertFill({
+      id,
+      account: a.id,
+      market: m.id,
+      direction: d,
+      quantity: qty,
+      cost,
+      fee,
+      time: now,
+    });
     a.cash = money(units(a.cash) - cost - fee);
-    store.put("account", a.id, a);
+    await store.put("account", a.id, a);
     const result = {
       status: "filled",
       quantity: qty,
@@ -181,8 +191,8 @@ export function paperFill(
       fee: money(fee),
       id,
     };
-    store.put("execution", key, result);
-    store.event(
+    await store.put("execution", key, result);
+    await store.event(
       "paper.fill",
       { ...result, accountId: a.id, marketId: m.id },
       now,
@@ -190,7 +200,7 @@ export function paperFill(
     return result;
   });
 }
-export function settle(store: Store, m: Market, now = Date.now()) {
+export async function settle(store: Store, m: Market, now = Date.now()) {
   if (
     !m.payout ||
     m.status !== "RESOLVED" ||
@@ -202,8 +212,8 @@ export function settle(store: Store, m: Market, now = Date.now()) {
     Math.abs(m.payout[0] + m.payout[1] - 1) > 1e-9
   )
     throw Error("invalid_resolution");
-  store.transaction(() => {
-    const previous = store.get<Market>("market", m.id);
+  await store.transaction(async () => {
+    const previous = await store.get<Market>("market", m.id);
     if (
       previous &&
       (previous.start !== m.start ||
@@ -217,20 +227,16 @@ export function settle(store: Store, m: Market, now = Date.now()) {
       JSON.stringify(previous.payout) !== JSON.stringify(m.payout)
     )
       throw Error("resolution_conflict");
-    const rows = store.db
-      .prepare("SELECT * FROM fills WHERE market=? AND payout IS NULL")
-      .all(m.id) as any[];
+    const rows = await store.unsettledMarketFills(m.id);
     for (const f of rows) {
       const payout = units(
         f.quantity * m.payout![f.direction === "up" ? 0 : 1],
       );
-      const a = store.get<Account>("account", f.account)!;
+      const a = (await store.get<Account>("account", f.account))!;
       a.cash = money(units(a.cash) + payout);
-      store.put("account", a.id, a);
-      store.db
-        .prepare("UPDATE fills SET payout=?,pnl=?,settled_at=? WHERE id=?")
-        .run(payout, payout - f.cost - f.fee, now, f.id);
-      store.event(
+      await store.put("account", a.id, a);
+      await store.settleFill(f.id, payout, payout - f.cost - f.fee, now);
+      await store.event(
         "paper.settlement",
         {
           fillId: f.id,
@@ -240,6 +246,6 @@ export function settle(store: Store, m: Market, now = Date.now()) {
         now,
       );
     }
-    store.put("market", m.id, m);
+    await store.put("market", m.id, m);
   });
 }

@@ -7,7 +7,10 @@ const { values } = parseArgs({
     duration: { type: "string", default: "60" },
     days: { type: "string", default: "60" },
     end: { type: "string" },
-    database: { type: "string", default: "data/history.db" },
+    database: {
+      type: "string",
+      default: process.env.MONGODB_HISTORY_DB_NAME ?? "predict_fun_history",
+    },
   },
 });
 const duration = Number(values.duration) as Duration,
@@ -17,7 +20,8 @@ if (!bars[duration] || !Number.isInteger(days) || days < 1 || days > 365)
 const end = values.end
   ? Number(values.end)
   : Math.floor(Date.now() / (duration * 1000)) * duration * 1000;
-const store = new Store(values.database!);
+if (!process.env.MONGODB_URI) throw Error("MONGODB_URI is required");
+const store = await Store.connect(process.env.MONGODB_URI, values.database!);
 try {
   const report = await backfill(store, {
     symbol: values.symbol!,
@@ -28,5 +32,5 @@ try {
   console.log(JSON.stringify(report, null, 2));
   if (!report.complete) process.exitCode = 2;
 } finally {
-  store.close();
+  await store.close();
 }

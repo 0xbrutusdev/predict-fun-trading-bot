@@ -29,6 +29,22 @@ export type Market = {
   tick: number;
   rulesHash: string;
   payout?: [number, number];
+  source?: "manual" | "predict-auto-v1";
+  conditionId?: string;
+  oracleQuestionId?: string;
+  resolutionProvider?: string;
+  priceFeedId?: string;
+  startPrice?: number;
+  endPrice?: number;
+  venueVisible?: boolean;
+  isNegRisk?: boolean;
+  isYieldBearing?: boolean;
+  registeredAt?: number;
+  resolutionSource?: string;
+  question?: string;
+  rulesText?: string;
+  categorySlug?: string;
+  blockedReason?: string;
 };
 export type Signal = {
   strategy: string;

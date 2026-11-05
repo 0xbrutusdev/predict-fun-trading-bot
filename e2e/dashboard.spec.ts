@@ -41,6 +41,19 @@ test("authenticated operator flow through Next.js and worker", async ({
     page.getByRole("heading", { name: "最近运行事件" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "总览" }).click();
+  await page.route("**/api/bot/observability", (route) =>
+    route.fulfill({
+      status: 502,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "worker_error" } }),
+    }),
+  );
+  await page.getByRole("button", { name: "刷新", exact: false }).click();
+  await expect(page.getByText("worker_error", { exact: false })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "暂停全部账户" }),
+  ).toBeEnabled();
+  await page.unroute("**/api/bot/observability");
   await page.screenshot({
     path: "test-results/dashboard-desktop.png",
     fullPage: true,

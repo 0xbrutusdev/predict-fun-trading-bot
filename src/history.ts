@@ -2,11 +2,6 @@ import { Store } from "./store.js";
 import type { Candle } from "./domain.js";
 export const bars = { 60: "1m", 300: "5m", 900: "15m", 3600: "1H" } as const;
 export type Duration = keyof typeof bars;
-export function initializeHistory(store: Store) {
-  store.db.exec(
-    `CREATE TABLE IF NOT EXISTS candle_observations(symbol TEXT NOT NULL,duration INTEGER NOT NULL,bar_time INTEGER NOT NULL,observed_at INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(symbol,duration,bar_time,observed_at)); CREATE INDEX IF NOT EXISTS candle_history_range ON candle_observations(symbol,duration,bar_time);`,
-  );
-}
 export function parseCandles(
   payload: unknown,
   duration: Duration,
@@ -36,36 +31,25 @@ export function parseCandles(
       return { time, open, high, low, close, volume };
     });
 }
-export function archiveCandles(
+export async function archiveCandles(
   store: Store,
   symbol: string,
   duration: Duration,
   rows: Candle[],
   observedAt: number,
 ) {
-  initializeHistory(store);
-  const insert = store.db.prepare(
-    "INSERT OR IGNORE INTO candle_observations VALUES(?,?,?,?,?)",
-  );
   for (const row of rows)
-    insert.run(symbol, duration, row.time, observedAt, JSON.stringify(row));
+    await store.archiveCandle(symbol, duration, row, observedAt);
 }
-export function historyAt(
+export async function historyAt(
   store: Store,
   symbol: string,
   duration: Duration,
   start: number,
   end: number,
   availableAt: number,
-): Candle[] {
-  initializeHistory(store);
-  return (
-    store.db
-      .prepare(
-        `SELECT json FROM (SELECT json,bar_time,ROW_NUMBER() OVER(PARTITION BY bar_time ORDER BY observed_at DESC) version FROM candle_observations WHERE symbol=? AND duration=? AND bar_time>=? AND bar_time<? AND observed_at<=?) WHERE version=1 ORDER BY bar_time`,
-      )
-      .all(symbol, duration, start, end, availableAt) as { json: string }[]
-  ).map((x) => JSON.parse(x.json));
+): Promise<Candle[]> {
+  return store.candleHistory(symbol, duration, start, end, availableAt);
 }
 type Options = {
   symbol: string;
@@ -105,10 +89,10 @@ export async function backfill(
       return response.json() as Promise<{ code: string; data: unknown }>;
     });
   const id = `${o.symbol}:${o.duration}:${o.start}:${o.end}`;
-  const job = store.get<{ cursor: number; pages: number }>(
+  const job = (await store.get<{ cursor: number; pages: number }>(
     "history_job",
     id,
-  ) ?? { cursor: o.end, pages: 0 };
+  )) ?? { cursor: o.end, pages: 0 };
   let pages = 0;
   while (job.cursor > o.start && pages < (o.maxPages ?? 5000)) {
     const url = `https://www.okx.com/api/v5/market/history-candles?instId=${o.symbol}-USDT-SWAP&bar=${bars[o.duration]}&after=${job.cursor}&limit=100`;
@@ -131,12 +115,12 @@ export async function backfill(
     if (!rows.length) break;
     const cursor = Math.min(...rows.map((x) => x.time));
     if (cursor >= job.cursor) throw Error("non_advancing_history_cursor");
-    store.transaction(() => {
-      archiveCandles(store, o.symbol, o.duration, rows, receivedAt);
+    await store.transaction(async () => {
+      await archiveCandles(store, o.symbol, o.duration, rows, receivedAt);
       job.cursor = cursor;
       job.pages++;
-      store.put("history_job", id, job);
-      store.event(
+      await store.put("history_job", id, job);
+      await store.event(
         "candles.backfill",
         { symbol: o.symbol, duration: o.duration, rows, jobId: id },
         receivedAt,
@@ -145,7 +129,14 @@ export async function backfill(
     pages++;
     await wait(250);
   }
-  const rows = historyAt(store, o.symbol, o.duration, o.start, o.end, now()),
+  const rows = await historyAt(
+      store,
+      o.symbol,
+      o.duration,
+      o.start,
+      o.end,
+      now(),
+    ),
     expected = (o.end - o.start) / (o.duration * 1000),
     present = new Set(rows.map((x) => x.time));
   let missing = 0;
@@ -169,6 +160,6 @@ export async function backfill(
     pages: job.pages,
     cursor: job.cursor,
   };
-  store.put("history_report", id, report);
+  await store.put("history_report", id, report);
   return report;
 }

@@ -53,7 +53,7 @@ test("replay closed candles through signal, checkpoint, fill and supplied payout
       paperFeeBps: 200,
       createdAt: start - 1000,
     };
-    store.put("config", "a", { enabledSlots: ["18"] });
+    await store.put("config", "a", { enabledSlots: ["18"] });
     const market = {
       id: "m",
       symbol: "SOL",
@@ -102,9 +102,9 @@ test("replay closed candles through signal, checkpoint, fill and supplied payout
     const result = await replay(path, store);
     assert.equal(result.fills.length, 1);
     assert.equal((result.fills[0] as any).pnl, 7350000);
-    assert.equal(store.get<any>("account", "a").cash, 10007.35);
+    assert.equal((await store.get<any>("account", "a"))!.cash, 10007.35);
   } finally {
-    store.close();
+    await store.close();
     if (!dir.startsWith(join(tmpdir(), "predict-replay-")))
       throw Error("unsafe_test_cleanup");
     rmSync(dir, { recursive: true, force: true });

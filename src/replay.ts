@@ -22,22 +22,22 @@ export async function replay(path: string, store: Store) {
     previous = e.time;
     switch (e.type) {
       case "setup.account":
-        if (store.get("account", e.data.id))
+        if (await store.get("account", e.data.id))
           throw Error("duplicate_account_setup");
-        store.put("account", e.data.id, e.data);
+        await store.put("account", e.data.id, e.data);
         break;
       case "setup.market":
-        if (store.get("market", e.data.id))
+        if (await store.get("market", e.data.id))
           throw Error("duplicate_market_setup");
-        store.put("market", e.data.id, e.data);
+        await store.put("market", e.data.id, e.data);
         break;
       case "book":
-        collector.recordBook({ ...e.data, receivedAt: e.time });
+        await collector.recordBook({ ...e.data, receivedAt: e.time });
         break;
       case "candles": {
         const key = `${e.data.symbol}:${e.data.duration}`,
-          old = store.get<any[]>("candles", key) || [];
-        store.put(
+          old = (await store.get<any[]>("candles", key)) || [];
+        await store.put(
           "candles",
           key,
           [
@@ -49,20 +49,20 @@ export async function replay(path: string, store: Store) {
         break;
       }
       case "resolution":
-        settle(store, e.data, e.time);
+        await settle(store, e.data, e.time);
         break;
       case "clock":
         break;
       default:
         continue;
     }
-    engine.step(e.time);
+    await engine.step(e.time);
     count++;
   }
   return {
     events: count,
-    accounts: store.list("account"),
-    fills: store.db.prepare("SELECT * FROM fills").all(),
+    accounts: await store.list("account"),
+    fills: await store.allFills(),
   };
 }
 if (
@@ -74,6 +74,6 @@ if (
   try {
     console.log(JSON.stringify(await replay(process.argv[2], store), null, 2));
   } finally {
-    store.close();
+    await store.close();
   }
 }
